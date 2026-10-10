@@ -13,14 +13,24 @@ const { createClient } = require('@supabase/supabase-js');
 const COLLECTIONS_MAP = {
   visitsClinic: 'visits_clinic',
   visits_clinic: 'visits_clinic',
+  clinic_visits: 'visits_clinic',
+  clinic: 'visits_clinic',
   visitsDental: 'visits_dental',
   visits_dental: 'visits_dental',
+  dental_visits: 'visits_dental',
+  dental: 'visits_dental',
   visitsOperations: 'visits_operations',
   visits_operations: 'visits_operations',
+  operations_visits: 'visits_operations',
+  operations: 'visits_operations',
   visitsLabs: 'visits_labs',
   visits_labs: 'visits_labs',
+  labs_visits: 'visits_labs',
+  labs: 'visits_labs',
   visitsRadiology: 'visits_radiology',
   visits_radiology: 'visits_radiology',
+  radiology_visits: 'visits_radiology',
+  radiology: 'visits_radiology',
   doctors: 'doctors',
   employees: 'employees',
   income: 'income',
@@ -115,6 +125,78 @@ async function run() {
   }
 
   const supabase = createClient(url, serviceKey, { auth: { persistSession: false } });
+
+  // 1.5 Support unified visits collection if present
+  if (sourceData.visits) {
+    const rawVisits = sourceData.visits;
+    const unifiedList = Array.isArray(rawVisits)
+      ? rawVisits
+      : (typeof rawVisits === 'object' && rawVisits !== null ? Object.entries(rawVisits).map(([id, doc]) => ({ id: (doc && doc.id) || id, ...(doc || {}) })) : []);
+    for (const v of unifiedList) {
+      if (!v || !v.id) continue;
+      const k = String(v.kind || v.type || v.section || v.department || '').toLowerCase();
+      const target = k.includes('dent') || k.includes('أسنان') ? 'visits_dental'
+        : k.includes('oper') || k.includes('عمليات') ? 'visits_operations'
+        : k.includes('lab') || k.includes('تحاليل') ? 'visits_labs'
+        : k.includes('rad') || k.includes('xray') || k.includes('أشعة') ? 'visits_radiology'
+        : 'visits_clinic';
+      sourceData[target] = sourceData[target] || [];
+      if (!sourceData[target].some(x => x.id === v.id)) sourceData[target].push(v);
+    }
+  }
+
+  // 1.6 If income contains visit-income-* entries but visit collections are empty or missing:
+  const rawIncome = sourceData.income;
+  if (rawIncome) {
+    const incomeList = Array.isArray(rawIncome)
+      ? rawIncome
+      : (typeof rawIncome === 'object' && rawIncome !== null ? Object.entries(rawIncome).map(([id, doc]) => ({ id: (doc && doc.id) || id, ...(doc || {}) })) : []);
+    const KIND_MAP = {
+      clinic: 'visits_clinic',
+      dental: 'visits_dental',
+      visitsDental: 'visits_dental',
+      operations: 'visits_operations',
+      labs: 'visits_labs',
+      radiology: 'visits_radiology'
+    };
+    for (const inc of incomeList) {
+      if (!inc || !inc.id || !inc.id.startsWith('visit-income-')) continue;
+      const parts = inc.id.split('-');
+      const kind = parts[2];
+      const targetColl = KIND_MAP[kind];
+      if (!targetColl) continue;
+      sourceData[targetColl] = sourceData[targetColl] || [];
+      const visitId = inc.id.replace(`visit-income-${kind}-`, '');
+      if (!sourceData[targetColl].some(x => x.id === visitId)) {
+        let patientName = inc.party || '';
+        if (!patientName && inc.desc) {
+          const m = inc.desc.match(/—\s*([^()]+)/);
+          if (m) patientName = m[1].trim();
+        }
+        const amt = Number(inc.amount) || 0;
+        const fileNo = (inc.receiptNo && !inc.receiptNo.startsWith('V-m')) ? inc.receiptNo.replace(/^V-/, '') : '';
+        const vObj = {
+          id: visitId,
+          date: inc.date || (inc.createdAt ? inc.createdAt.slice(0, 10) : new Date().toISOString().slice(0, 10)),
+          patient: patientName || 'مريض',
+          fileNo: fileNo,
+          phone: '',
+          doctorId: inc.doctorId || '',
+          total: amt,
+          paid: amt,
+          status: 'تم',
+          paymentMethod: inc.paymentMethod || 'نقدي',
+          notes: (inc.notes && inc.notes !== 'تم إنشاؤه تلقائيًا من سجل الزيارات') ? inc.notes : '',
+          linkedIncomeId: inc.id,
+          createdAt: inc.createdAt || new Date().toISOString(),
+          updatedAt: inc.updatedAt || new Date().toISOString()
+        };
+        if (targetColl === 'visits_clinic' || targetColl === 'visits_dental') vObj.examType = 'كشف';
+        else vObj.serviceName = targetColl === 'visits_operations' ? 'عملية' : targetColl === 'visits_labs' ? 'تحليل' : 'أشعة';
+        sourceData[targetColl].push(vObj);
+      }
+    }
+  }
 
   // 2. Process Business Collections
   for (const [key, targetCollection] of Object.entries(COLLECTIONS_MAP)) {

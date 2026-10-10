@@ -6960,6 +6960,11 @@ function renderSettings() {
         <p style="font-size:12px; color:var(--muted); margin-bottom:8px;">📁 يمكنك رفع ملف JSON مستخرج من Firebase أو نسخة احتياطية سابقة ليتم استيرادها وحفظها مباشرة في قاعدة بيانات Supabase السحابية. (للمدير فقط)</p>
         <input type="file" id="restoreBackupInput" accept="application/json,.json" ${isAdminUser() ? "" : "disabled"}>
       </div>
+      <div style="margin-top:14px; padding-top:12px; border-top:1px dashed var(--border,#eee);">
+        <div style="font-weight:700; font-size:13px; margin-bottom:4px; color:var(--primary,#1b5e20);">🔄 مطابقة واستعادة اليوميات من قيود الوارد</div>
+        <p style="font-size:12px; color:var(--muted); margin-bottom:8px;">في حال كانت حركات الوارد موجودة ولكن الزيارات لا تظهر في اليوميات، يقوم هذا الإجراء بفحص سجل الوارد واستعادة ومزامنة جميع زيارات العيادات والأسنان والعمليات والتحاليل والأشعة تلقائيًا إلى اليوميات.</p>
+        <button type="button" class="btn sm ghost" id="reconstructVisitsFromIncomeBtn" ${isAdminUser() ? "" : "disabled"}>🔄 استعادة ومزامنة الزيارات من قيود الوارد الآن</button>
+      </div>
     </div>` : ""}
 
     ${can("categories","view") ? `
@@ -7282,10 +7287,25 @@ function renderSettings() {
       const rawSource = parsed && parsed.data ? parsed.data : parsed; // دعم الملف بصيغته أو مباشرة ككائن بيانات
       const ALIASES = {
         visits_clinic: "visitsClinic",
+        clinic_visits: "visitsClinic",
+        clinic: "visitsClinic",
+        visitsClinic: "visitsClinic",
         visits_dental: "visitsDental",
+        dental_visits: "visitsDental",
+        dental: "visitsDental",
+        visitsDental: "visitsDental",
         visits_operations: "visitsOperations",
+        operations_visits: "visitsOperations",
+        operations: "visitsOperations",
+        visitsOperations: "visitsOperations",
         visits_labs: "visitsLabs",
+        labs_visits: "visitsLabs",
+        labs: "visitsLabs",
+        visitsLabs: "visitsLabs",
         visits_radiology: "visitsRadiology",
+        radiology_visits: "visitsRadiology",
+        radiology: "visitsRadiology",
+        visitsRadiology: "visitsRadiology",
         lab_expenses: "labExpenses",
         audit_log: "auditLog",
         staff_accounts: "staffAccounts",
@@ -7301,6 +7321,75 @@ function renderSettings() {
           data[canonicalKey] = v;
         }
       });
+
+      // إذا كان الملف يحتوي على مصفوفة زيارات مجمّعة (visits) وزّعها على الأقسام
+      if (Array.isArray(rawSource.visits) || (rawSource.visits && typeof rawSource.visits === "object")) {
+        const unifiedVisits = Array.isArray(rawSource.visits)
+          ? rawSource.visits
+          : Object.entries(rawSource.visits).map(([id, doc]) => ({ id: (doc && doc.id) || id, ...(doc || {}) }));
+        unifiedVisits.forEach(v => {
+          if (!v || !v.id) return;
+          const k = String(v.kind || v.type || v.section || v.department || "").toLowerCase();
+          const target = k.includes("dent") || k.includes("أسنان") ? "visitsDental"
+            : k.includes("oper") || k.includes("عمليات") ? "visitsOperations"
+            : k.includes("lab") || k.includes("تحاليل") ? "visitsLabs"
+            : k.includes("rad") || k.includes("xray") || k.includes("أشعة") ? "visitsRadiology"
+            : "visitsClinic";
+          data[target] = data[target] || [];
+          if (!data[target].some(x => x.id === v.id)) data[target].push(v);
+        });
+      }
+
+      // إذا كان الملف يحتوي على قيود وارد ناتجة عن زيارات ولكن جداول الزيارات لم تُرفق بالملف:
+      // استرجع الزيارات فورًا من سجل الوارد حتى لا تكون اليوميات فارغة
+      const KIND_TO_LIST_MAP = {
+        clinic: "visitsClinic",
+        dental: "visitsDental",
+        visitsDental: "visitsDental",
+        operations: "visitsOperations",
+        labs: "visitsLabs",
+        radiology: "visitsRadiology"
+      };
+      if (Array.isArray(data.income)) {
+        data.income.forEach(inc => {
+          if (!inc || !inc.id || !inc.id.startsWith("visit-income-")) return;
+          const parts = inc.id.split("-");
+          const kind = parts[2];
+          const listKey = KIND_TO_LIST_MAP[kind];
+          if (!listKey) return;
+          data[listKey] = data[listKey] || [];
+          const visitId = inc.id.replace(`visit-income-${kind}-`, "");
+          if (!data[listKey].some(x => x.id === visitId)) {
+            let patientName = inc.party || "";
+            if (!patientName && inc.desc) {
+              const m = inc.desc.match(/—\s*([^()]+)/);
+              if (m) patientName = m[1].trim();
+            }
+            const amt = Number(inc.amount) || 0;
+            const fileNo = (inc.receiptNo && !inc.receiptNo.startsWith("V-m")) ? inc.receiptNo.replace(/^V-/, "") : "";
+            const vObj = {
+              id: visitId,
+              date: inc.date || (inc.createdAt ? inc.createdAt.slice(0, 10) : todayISO()),
+              patient: patientName || "مريض",
+              fileNo: fileNo,
+              phone: "",
+              doctorId: inc.doctorId || "",
+              total: amt,
+              paid: amt,
+              status: "تم",
+              paymentMethod: inc.paymentMethod || "نقدي",
+              notes: (inc.notes && inc.notes !== "تم إنشاؤه تلقائيًا من سجل الزيارات") ? inc.notes : "",
+              linkedIncomeId: inc.id,
+              createdAt: inc.createdAt || nowISO(),
+              updatedAt: inc.updatedAt || nowISO()
+            };
+            if (listKey === "visitsClinic" || listKey === "visitsDental") vObj.examType = "كشف";
+            else vObj.serviceName = listKey === "visitsOperations" ? "عملية" : listKey === "visitsLabs" ? "تحليل" : "أشعة";
+            data[listKey].push(vObj);
+          }
+        });
+      }
+
       const foundKeys = BACKUP_KEYS.filter(k => data && Object.prototype.hasOwnProperty.call(data, k));
       if (!foundKeys.length) { showToast("⚠️ لم يتم التعرف على هذا الملف كنسخة احتياطية للنظام"); restoreBackupInput.value = ""; return; }
       const when = parsed?.exportedAt ? new Date(parsed.exportedAt).toLocaleString("ar-EG") : "غير معروف";
@@ -7350,6 +7439,86 @@ function renderSettings() {
     };
     reader.onerror = () => { showToast("⚠️ تعذّر قراءة الملف"); restoreBackupInput.value = ""; };
     reader.readAsText(file);
+  });
+
+  const reconstructVisitsBtn = document.getElementById("reconstructVisitsFromIncomeBtn");
+  if (reconstructVisitsBtn) reconstructVisitsBtn.addEventListener("click", async () => {
+    if (!isAdminUser()) { showToast("⚠️ العملية متاحة للمدير فقط"); return; }
+    if (!confirm("هل تريد فحص سجل الوارد واستعادة أي زيارات مرتبطة في اليوميات (عيادات، أسنان، عمليات، تحاليل، أشعة)؟")) return;
+    showToast("⏳ جارٍ فحص سجل الوارد واستعادة الزيارات...", 45000);
+    try {
+      if (!window.MitaliSupabase) throw new Error("Supabase adapter is not loaded");
+      const incomeList = await window.MitaliSupabase.getTable("income");
+      if (!Array.isArray(incomeList) || !incomeList.length) {
+        showToast("⚠️ سجل الوارد فارغ");
+        return;
+      }
+      const KIND_TO_KEY = {
+        clinic: "visitsClinic",
+        dental: "visitsDental",
+        visitsDental: "visitsDental",
+        operations: "visitsOperations",
+        labs: "visitsLabs",
+        radiology: "visitsRadiology"
+      };
+      const batches = {
+        visitsClinic: [],
+        visitsDental: [],
+        visitsOperations: [],
+        visitsLabs: [],
+        radiologyVisits: [],
+        visitsRadiology: []
+      };
+      for (const inc of incomeList) {
+        if (!inc || !inc.id || !inc.id.startsWith("visit-income-")) continue;
+        const parts = inc.id.split("-");
+        const kind = parts[2];
+        const listKey = KIND_TO_KEY[kind];
+        if (!listKey) continue;
+        batches[listKey] = batches[listKey] || [];
+        const visitId = inc.id.replace(`visit-income-${kind}-`, "");
+        let patientName = inc.party || "";
+        if (!patientName && inc.desc) {
+          const m = inc.desc.match(/—\s*([^()]+)/);
+          if (m) patientName = m[1].trim();
+        }
+        const amt = Number(inc.amount) || 0;
+        const fileNo = (inc.receiptNo && !inc.receiptNo.startsWith("V-m")) ? inc.receiptNo.replace(/^V-/, "") : "";
+        const payload = {
+          id: visitId,
+          date: inc.date || (inc.createdAt ? inc.createdAt.slice(0, 10) : todayISO()),
+          patient: patientName || "مريض",
+          fileNo: fileNo,
+          phone: "",
+          doctorId: inc.doctorId || "",
+          total: amt,
+          paid: amt,
+          status: "تم",
+          paymentMethod: inc.paymentMethod || "نقدي",
+          notes: (inc.notes && inc.notes !== "تم إنشاؤه تلقائيًا من سجل الزيارات") ? inc.notes : "",
+          linkedIncomeId: inc.id,
+          createdAt: inc.createdAt || nowISO(),
+          updatedAt: nowISO()
+        };
+        if (listKey === "visitsClinic" || listKey === "visitsDental") payload.examType = "كشف";
+        else payload.serviceName = listKey === "visitsOperations" ? "عملية" : listKey === "visitsLabs" ? "تحليل" : "أشعة";
+        batches[listKey].push(payload);
+      }
+      let totalRestored = 0;
+      for (const [key, records] of Object.entries(batches)) {
+        if (records.length && window.MitaliSupabase.upsertRecords) {
+          totalRestored += records.length;
+          DB[key] = records;
+          await window.MitaliSupabase.upsertRecords(key, records);
+        }
+      }
+      logActivity(`استعادة ${totalRestored} زيارة من سجل الوارد`, "settings");
+      saveToast(`تمت العملية بنجاح — تم استعادة ومزامنة ${totalRestored} زيارة إلى اليوميات`);
+      route();
+    } catch (e) {
+      console.error("Reconstruct visits failed:", e);
+      showToast("⚠️ تعذّرت الاستعادة: " + (e.message || "خطأ غير معروف"), 5000);
+    }
   });
 
   // ---- إدارة التصنيفات ----
