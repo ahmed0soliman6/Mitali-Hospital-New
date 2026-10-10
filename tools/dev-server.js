@@ -23,6 +23,19 @@ app.all('/api/auth/profile', (req, res) => profileHandler(req, res));
 app.all('/api/financial/summary', (req, res) => summaryHandler(req, res));
 app.all('/api/financial/reports', (req, res) => reportsHandler(req, res));
 
+// Dynamic runtime config from environment variables
+app.get('/supabase-config.js', (_req, res) => {
+  const url = String(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
+  const anonKey = String(process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '').trim();
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(
+    `window.SUPABASE_URL = window.SUPABASE_URL || ${JSON.stringify(url)};\n` +
+    `window.SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || ${JSON.stringify(anonKey)};\n` +
+    `window.MITALI_API_BASE = window.MITALI_API_BASE || "";\n`
+  );
+});
+
 // Static files
 app.use(express.static(projectRoot, {
   index: 'index.html',
@@ -33,6 +46,8 @@ app.use(express.static(projectRoot, {
     } else if (filePath.endsWith('.webmanifest') || filePath.endsWith('manifest.json')) {
       res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
       res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
+    } else if (filePath.endsWith('.js') || filePath.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     }
   }
 }));

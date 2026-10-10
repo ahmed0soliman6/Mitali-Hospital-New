@@ -10,12 +10,15 @@
   <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png">
   
 <title>نظام إدارة مستشفى لجنة زكاة ميت على التخصصي</title>
+<meta name="description" content="نظام إدارة متكامل لمستشفى لجنة زكاة ميت على التخصصي يشمل العيادات، حسابات المرضى، الصيدلية، الأطباء والموظفين">
+<meta property="og:title" content="نظام إدارة مستشفى لجنة زكاة ميت على التخصصي">
+<meta property="og:description" content="نظام إدارة متكامل لمستشفى لجنة زكاة ميت على التخصصي يشمل العيادات، حسابات المرضى، الصيدلية، الأطباء والموظفين">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@500;700;900&family=Cairo:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="./supabase-config.js"></script>
-<script src="./supabase-store.js?v=1.0.0"></script>
+<script src="./supabase-store.js?v=1.0.3"></script>
 <style>
   :root{
     --navy:#173B4A;
@@ -8817,12 +8820,14 @@ async function handleCloudWipeMarker(record) {
 function subscribeCloudWipeControl() {
   if (cloudWipeUnsub || STORAGE_MODE !== "supabase" || !window.MitaliSupabase || !window.MitaliSupabase.authUser()) return;
   try {
-    cloudWipeUnsub = window.MitaliSupabase.subscribe("systemControl", (changes) => {
-      const marker = [...(Array.isArray(changes) ? changes : [])].reverse().find(change => change && change.record && change.record.lastWipeId);
-      if (marker && marker.type !== "removed") handleCloudWipeMarker(marker.record);
-    }, (error) => console.warn("Cloud wipe control listener error:", error));
+    if (typeof window.MitaliSupabase.subscribe === "function") {
+      cloudWipeUnsub = window.MitaliSupabase.subscribe("systemControl", (changes) => {
+        const marker = [...(Array.isArray(changes) ? changes : [])].reverse().find(change => change && change.record && change.record.lastWipeId);
+        if (marker && marker.type !== "removed") handleCloudWipeMarker(marker.record);
+      }, (error) => console.warn("Cloud wipe control listener error:", error));
+    }
   } catch (error) {
-    console.error("Cloud wipe control listener failed:", error);
+    console.warn("Cloud wipe control listener skipped:", error?.message || error);
   }
 }
 

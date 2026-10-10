@@ -6,12 +6,30 @@ create table if not exists public.data_records (
   collection text not null,
   id text not null,
   payload jsonb not null default '{}'::jsonb,
-  date_text date generated always as (nullif(payload->>'date','')::date) stored,
-  month_text text generated always as (coalesce(nullif(payload->>'month',''), substring(payload->>'date',1,7))) stored,
+  date_text text,
+  month_text text,
   updated_at timestamptz not null default now(),
   created_at timestamptz not null default now(),
   primary key (collection, id)
 );
+
+create or replace function public.sync_data_records_fields() returns trigger language plpgsql as $$
+begin
+  if new.date_text is null or new.date_text = '' then
+    new.date_text = nullif(new.payload->>'date', '');
+  end if;
+  if new.month_text is null or new.month_text = '' then
+    new.month_text = coalesce(nullif(new.payload->>'month', ''), substring(new.payload->>'date' from 1 for 7));
+  end if;
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+drop trigger if exists data_records_fields_sync on public.data_records;
+create trigger data_records_fields_sync
+before insert or update on public.data_records
+for each row execute function public.sync_data_records_fields();
 create index if not exists data_records_collection_updated_idx on public.data_records(collection, updated_at desc, id desc);
 create index if not exists data_records_collection_date_idx on public.data_records(collection, date_text desc, id desc);
 create index if not exists data_records_collection_month_idx on public.data_records(collection, month_text desc, id desc);
@@ -80,4 +98,21 @@ drop trigger if exists profiles_updated_at on public.profiles;
 create trigger profiles_updated_at before update on public.profiles for each row execute function public.set_updated_at();
 
 -- Realtime is intentionally enabled only for the generic data table.
-alter publication supabase_realtime add table public.data_records;
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables 
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'data_records'
+  ) then
+    alter publication supabase_realtime add table public.data_records;
+  end if;
+end $$;
+
+-- ربط حساب المدير الأول admin في جدول profiles إذا كان موجودًا في auth.users
+insert into public.profiles (id, username, display_name, role, status, permissions)
+select id, 'admin', 'مدير النظام', 'مدير', 'نشط', '{}'::jsonb
+from auth.users
+where email ilike 'u-ywrtaw4@accounts.mitali-hospital.internal'
+on conflict (id) do update set
+  role = 'مدير',
+  status = 'نشط';

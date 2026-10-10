@@ -1,6 +1,6 @@
 // Bumped with the server-side pagination release so clients activate the new
 // index.html/supabase-store.js pair instead of retaining an older shell.
-const CACHE_NAME = 'hospital-v1.3.52-firestore-pagination';
+const CACHE_NAME = 'hospital-v1.3.53-fix-systemcontrol';
 const urlsToCache = ['./index.html', './manifest.json', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png', './favicon-32.png'];
 
 function isApiRequest(request) {
@@ -56,6 +56,20 @@ self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET' || isApiRequest(event.request)) return;
   if (isNavigationRequest(event.request)) {
     event.respondWith(networkFirstDocument(event.request));
+    return;
+  }
+  if (event.request.url.includes('.js')) {
+    event.respondWith(
+      fetch(event.request, { cache: 'no-cache' })
+        .then(response => {
+          if (response && response.status === 200) {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
+          }
+          return response;
+        })
+        .catch(() => caches.match(event.request))
+    );
     return;
   }
   event.respondWith(

@@ -45,15 +45,10 @@
     "test": "npm run check && npm run test:income-form && npm run test:doctor-payroll && npm run test:accounting-consistency && npm run test:doctor-departments && npm run test:visit-window-size"
   },
   "dependencies": {
-    "electron-log": "^5.4.4",
-    "electron-updater": "^6.8.9",
     "express": "^4.21.2",
     "@supabase/supabase-js": "^2.57.0"
   },
-  "devDependencies": {
-    "electron": "^37.2.6",
-    "electron-builder": "^26.0.12"
-  },
+  "devDependencies": {},
   "build": {
     "appId": "com.mitali.hospital",
     "productName": "Mitali Hospital",
