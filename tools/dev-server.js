@@ -32,7 +32,8 @@ app.get('/supabase-config.js', (_req, res) => {
   res.send(
     `window.SUPABASE_URL = window.SUPABASE_URL || ${JSON.stringify(url)};\n` +
     `window.SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || ${JSON.stringify(anonKey)};\n` +
-    `window.MITALI_API_BASE = window.MITALI_API_BASE || "";\n`
+    `window.MITALI_API_BASE = window.MITALI_API_BASE || "";\n` +
+    `window.MITALI_IS_PROD = true;\n`
   );
 });
 

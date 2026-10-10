@@ -606,6 +606,32 @@ function hasAnySettingsAccess() {
   return s || sub;
 }
 
+function canWriteTable(key) {
+  if (!currentUser) return false;
+  const account = getCurrentAccount();
+  if (!account || account.status === "موقوف") return false;
+  if (account.role === "مدير") return true;
+  switch (key) {
+    case "visitsClinic": return can("clinic", "add") || can("clinic", "edit");
+    case "visitsDental": return can("dental", "add") || can("dental", "edit");
+    case "visitsOperations": return can("operations", "add") || can("operations", "edit");
+    case "visitsLabs": return can("labs", "add") || can("labs", "edit");
+    case "visitsRadiology": return can("radiology", "add") || can("radiology", "edit");
+    case "income": return can("income", "add") || can("income", "edit");
+    case "expense": return can("expense", "add") || can("expense", "edit");
+    case "payroll": return can("payroll", "add") || can("payroll", "edit");
+    case "doctors": return can("doctors", "add") || can("doctors", "edit");
+    case "employees": return can("employees", "add") || can("employees", "edit");
+    case "settings": return can("settings", "edit");
+    case "categories": return can("categories", "add") || can("categories", "edit");
+    case "specialties": return can("specialties", "add") || can("specialties", "edit") || can("settings", "edit");
+    case "staffAccounts": return can("users", "add") || can("users", "edit");
+    case "auditLog": return true;
+    case "labExpenses": return can("payroll", "add") || can("payroll", "edit");
+    default: return true;
+  }
+}
+
 function seedStaffAccounts() {
   return [
     { id: "supabase-admin", username: "admin", password: "", displayName: "مدير النظام", role: "مدير", status: "نشط", createdAt: todayISO(), lastLogin: null, lastPasswordChangeAt: null, securityVersion: 1, firebaseUid: "akvBRlYmxveNlqrSWAbzLlkXIIR2", permissions: fullPermissions() },
@@ -928,8 +954,12 @@ async function flushSyncQueue() {
         await storeSet(key, latest);
         await clearSyncPending(key);
       } catch (e) {
-        // لا نمسح القيمة المحلية. عند امتلاء الحصة نوقف إعادة المحاولة مؤقتًا
-        // بدل إرسال نفس الكتابة كل 30 ثانية وإطالة فترة الرفض.
+        const isPerm = e?.code === "42501" || String(e?.message || "").includes("row-level security") || String(e?.message || "").includes("violates");
+        if (isPerm) {
+          console.warn(`Dropping ${key} from sync queue: permission denied.`);
+          await clearSyncPending(key);
+          continue;
+        }
         noteFirestoreQuotaError(e);
         break;
       }
@@ -1036,20 +1066,15 @@ async function detectStorageMode() {
   await initIDB();
   await loadSyncQueueState();
   if (window.MitaliSupabase) {
+    STORAGE_MODE = "supabase";
     try {
       await window.MitaliSupabase.init();
-      const supabaseUser = await window.MitaliSupabase.waitForAuth();
-      if (supabaseUser) {
-        STORAGE_MODE = "supabase";
-        try {
-          localStorage.setItem(FIRESTORE_ACTIVE_FLAG, "1");
-          localStorage.setItem(FIRESTORE_MIGRATED_FLAG, "1");
-        } catch (e) { /* ignore */ }
-        return;
-      }
+      localStorage.setItem(FIRESTORE_ACTIVE_FLAG, "1");
+      localStorage.setItem(FIRESTORE_MIGRATED_FLAG, "1");
     } catch (e) {
-      console.warn("Firestore unavailable; using local cache until login:", e);
+      console.warn("Supabase check:", e);
     }
+    return;
   }
   STORAGE_MODE = "local";
 }
@@ -1058,15 +1083,15 @@ async function detectStorageMode() {
 // local عند وجود مستخدم Supabase صالح، وإلا ستعرض كاشًا قديمًا ولن تطلب
 // collections المالية من Firestore.
 function activateFirestoreModeIfAuthenticated() {
-  const supabaseUser = window.MitaliSupabase && typeof window.MitaliSupabase.authUser === "function"
-    ? window.MitaliSupabase.authUser() : null;
-  if (!supabaseUser) return false;
-  STORAGE_MODE = "supabase";
-  try {
-    localStorage.setItem(FIRESTORE_ACTIVE_FLAG, "1");
-    localStorage.setItem(FIRESTORE_MIGRATED_FLAG, "1");
-  } catch (e) { /* ignore */ }
-  return true;
+  if (window.MitaliSupabase) {
+    STORAGE_MODE = "supabase";
+    try {
+      localStorage.setItem(FIRESTORE_ACTIVE_FLAG, "1");
+      localStorage.setItem(FIRESTORE_MIGRATED_FLAG, "1");
+    } catch (e) { /* ignore */ }
+    return true;
+  }
+  return false;
 }
 
 
@@ -1177,8 +1202,14 @@ async function storeSetInner(key, value) {
     renderStorageIndicator();
   } catch (e) {
     if (STORAGE_MODE === "supabase") {
-      noteFirestoreQuotaError(e);
-      await markSyncPending(key);
+      const isPerm = e?.code === "42501" || String(e?.message || "").includes("row-level security") || String(e?.message || "").includes("violates");
+      if (isPerm) {
+        console.warn(`Permission denied for "${key}"; clearing from sync queue:`, e.message);
+        await clearSyncPending(key);
+      } else {
+        noteFirestoreQuotaError(e);
+        await markSyncPending(key);
+      }
     }
     STORAGE_OK = false;
     throw e;
@@ -1534,7 +1565,8 @@ async function loadAll(options = {}) {
     readTable("labExpenses", []),
   ]);
 
-  const isFirstRun = !doctorsRaw || doctorsRaw.length === 0;
+  const isManager = currentUser && currentUser.role === "مدير";
+  const isFirstRun = isManager && (!doctorsRaw || doctorsRaw.length === 0);
   const or = (val, fallback) => (val && val.length) ? val : fallback;
   // التشغيل الأول يبدأ فارغًا؛ البيانات التجريبية لا تُنشأ تلقائيًا حتى لا تعود
   // بعد مسحها. يمكن للمدير توليدها يدويًا من بطاقة البيانات التجريبية إن احتاج.
@@ -1554,7 +1586,7 @@ async function loadAll(options = {}) {
   // تعديلها أو تعطيلها (0) من صفحة الإعدادات. لا نُعيد ضبطها هنا إن كانت صفرًا (معطّلة)
   // حتى نحترم اختيار المدير.
   DB.settings = ensureSettingsDefaults(DB.settings);
-  if (hadServiceTypesMigration) persist("settings");
+  if (hadServiceTypesMigration && can("settings", "edit")) persist("settings");
   const staffAccountsWasEmpty = !staffAccountsRaw || staffAccountsRaw.length === 0;
   DB.staffAccounts = or(staffAccountsRaw, seedStaffAccounts());
   // لا نُنشئ أو نكتب حسابات من الكاش المحلي؛ الحسابات تُدار عبر users/API فقط.
@@ -1562,12 +1594,12 @@ async function loadAll(options = {}) {
   DB.categories = categoriesRaw;
   if (!DB.categories || (!DB.categories.income?.length && !DB.categories.expense?.length)) {
     DB.categories = seedCategories();
-    persist("categories");
+    if (isManager || can("categories", "edit")) persist("categories");
   }
   DB.specialties = specialtiesRaw;
   if (!DB.specialties || !DB.specialties.length) {
     DB.specialties = seedSpecialties();
-    persist("specialties");
+    if (isManager || can("specialties", "edit") || can("settings", "edit")) persist("specialties");
   }
   DB.auditLog = auditLogRaw || [];
   // ترقية آمنة للسجلات القديمة: بعض نسخ الخدمة السابقة حفظت اليومية دون
@@ -1588,8 +1620,8 @@ async function loadAll(options = {}) {
   await backfillIncomeLinks(DB.visitsOperations, "operations");
   await backfillIncomeLinks(DB.visitsLabs, "labs");
   await backfillIncomeLinks(DB.visitsRadiology, "radiology");
-  if (incomeBackfillNeeded) await persist("income");
-  if (isFirstRun) {
+  if (incomeBackfillNeeded && can("income", "add")) await persist("income");
+  if (isFirstRun && isManager) {
     ["doctors","employees","visitsClinic","visitsDental","visitsOperations","visitsLabs","visitsRadiology","income","expense","payroll"].forEach(persist);
   }
   // تأكد من وجود حسابات الموظفين حتى لو لم تكن أول تشغيل (ترقية من نسخة قديمة)
@@ -2382,6 +2414,9 @@ function persistAfterPaint(key, label = "التعديل") {
 async function persist(key) {
   TABLE_MUTATION_GENERATION[key] = (TABLE_MUTATION_GENERATION[key] || 0) + 1;
   TABLE_MUTATION_AT[key] = Date.now();
+  if (currentUser && !canWriteTable(key)) {
+    return;
+  }
   PENDING_WRITES++;
   renderStorageIndicator();
   try {
@@ -4910,7 +4945,7 @@ async function loadPatientIndexPage(pageKey, targetPage) {
     const cursor = pageState.cursors[targetPage] || null;
     const fetcher = (window.MitaliSupabase && window.MitaliSupabase.getPatientIndexPage) || (typeof getPatientIndexPage === "function" ? getPatientIndexPage : null);
     if (!fetcher) throw new Error("getPatientIndexPage is not available");
-    let rawRes = await fetcher(pageKey, cursor);
+    let rawRes = await fetcher(pageKey, cursor, targetPage);
     let res = (rawRes && typeof rawRes === "object") ? rawRes : { records: [], hasMore: false, nextCursor: null };
 
     // فحص تلقائي ذكي: لو كانت الصفحة الأولى فارغة تمامًا، نقوم بالمزامنة التلقائية للفهرس من جدول الزيارات
@@ -4918,7 +4953,7 @@ async function loadPatientIndexPage(pageKey, targetPage) {
       try {
         console.log("Patient index empty, auto-syncing from visits...");
         await window.MitaliSupabase.syncPatientIndexes(pageKey === "patientFilesDental" ? "dental" : "clinic");
-        rawRes = await fetcher(pageKey, null);
+        rawRes = await fetcher(pageKey, null, 1);
         res = (rawRes && typeof rawRes === "object") ? rawRes : { records: [], hasMore: false, nextCursor: null };
       } catch (syncErr) {
         console.warn("Auto-sync patient index failed:", syncErr);
@@ -5015,8 +5050,8 @@ function renderPatientList(list, pageInfo = null, pageKey = "") {
             const pName = g.name || g.patient || g.patientName || "-";
             const pPhone = g.phone || "-";
             const vCount = g.totalVisits ?? g.visitsCount ?? (visits.length || 1);
-            const vDate = lastVisit?.date || g.lastVisitDate || g.date || (g.updatedAt ? String(g.updatedAt).slice(0, 10) : "-");
-            const timeStr = lastVisit?.createdAt || g.createdAt || g.updatedAt;
+            const vDate = g.lastVisitDate || lastVisit?.date || g.date || (g.updatedAt ? String(g.updatedAt).slice(0, 10) : "-");
+            const timeStr = g.lastVisitCreatedAt || lastVisit?.createdAt || g.createdAt || (g.updatedAt && !g.lastVisitDate ? g.updatedAt : null);
             const vTime = timeStr ? entryTimeDisplay(timeStr) : "";
             return `
             <tr>
@@ -8902,26 +8937,19 @@ function renderLogin(errorMsg) {
     // الموظف الجديد قد يبدأ من شاشة الدخول قبل وجود جلسة Supabase، لذلك يكون
     // loadAll الأول على Firestore الاحتياطي. بعد نجاح Auth نحوله فوراً إلى Firestore
     // حتى تكون كل عملياته وصلاحياته على المصدر الرئيسي نفسه.
-    if (supabaseAuthAccount && (isSupabaseOnlyUsername(username) || isFirestoreEnabled() || isFirestoreMigrated())) {
-      // تفعيل المصدر الرئيسي لكل متصفح جديد بعد نجاح Supabase Auth؛ لا نعتمد
-      // على localStorage الخاص بمتصفح سابق حتى لا يعود الحساب القديم من Firestore.
+    if (supabaseAuthAccount) {
       setFirestoreEnabled(true);
       try { localStorage.setItem(FIRESTORE_MIGRATED_FLAG, "1"); } catch (e) { /* ignore */ }
+      try { localStorage.setItem(FIRESTORE_ACTIVE_FLAG, "1"); } catch (e) { /* ignore */ }
       STORAGE_MODE = "supabase";
       try {
-        // لا نعيد انتظار شبكة Firestore مرتين في مسار الدخول؛ نستخدم الكاش
-        // المحلي فورًا، ثم realtime/التحديث الخلفي يجلبان أحدث السجلات بعد عرض الواجهة.
-        // لا نعيد تحميل staffAccounts من الكاش هنا؛ فقد وصلنا قبل قليل إلى
-        // النسخة المؤكدة من الخادم، وإعادة تحميلها محليًا كانت تستبدل الصلاحيات
-        // الحديثة ببيانات قديمة وتُظهر الحساب كأنه بلا صلاحيات. نحمّل بقية
-        // بيانات التشغيل فقط، وتبقى قائمة الحسابات من النسخة server-confirmed.
         const postLoginKeys = CORE_BOOT_KEYS.filter(key => key !== "staffAccounts");
-        loadKeys(postLoginKeys, { preferCache: true }).then(() => {
+        loadKeys(postLoginKeys, { preferCache: false }).then(() => {
           if (currentUser && state.page !== "login") route();
-        }).catch(reloadError => console.warn("Firestore post-login data reload failed:", reloadError));
+        }).catch(reloadError => console.warn("Supabase post-login data reload failed:", reloadError));
         account = (DB.staffAccounts || []).find(a => a.firebaseUid === supabaseAuthAccount.firebaseUid) || account;
       } catch (reloadError) {
-        console.warn("Firestore account reload after login failed:", reloadError);
+        console.warn("Supabase account reload after login failed:", reloadError);
       }
     }
     clearLoginFailures();
@@ -9163,6 +9191,7 @@ function subscribeFirestoreRealtime(page = state.page) {
 
 async function boot() {
   document.getElementById("content").innerHTML = `<div style="text-align:center; padding:80px; color:var(--muted);">جارٍ تحميل النظام...</div>`;
+  await detectStorageMode();
   try {
     // الجلسة المحفوظة تعرض الكاش المحلي فورًا؛ نقرأ staffAccounts فقط عند
     // شاشة الدخول، ثم نقرأ بيانات الصفحة الحالية بعد نجاح الجلسة.
@@ -9171,9 +9200,9 @@ async function boot() {
     const bootKeys = getSession() ? CORE_BOOT_KEYS.filter(key => key !== "staffAccounts") : ["staffAccounts"];
     await loadKeys(bootKeys, { preferCache: true });
   } catch (e) {
-    console.error("Load error, using defaults:", e);
-    DB.doctors = seedDoctors(); DB.employees = seedEmployees(); DB.settings = { openingBalance: 10000 };
-    DB.staffAccounts = seedStaffAccounts();
+    console.error("Load error, maintaining cache:", e);
+    DB.doctors = DB.doctors || []; DB.employees = DB.employees || []; DB.settings = DB.settings || { openingBalance: 0 };
+    DB.staffAccounts = DB.staffAccounts || seedStaffAccounts();
   }
   currentUser = getSession();
   if (!currentUser) { renderLogin(); return; }

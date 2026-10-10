@@ -258,13 +258,15 @@
   async function getPage(key, options = {}) {
     await ready();
     const collection = collectionName(key), pageSize = Math.min(Math.max(Number(options.pageSize) || 30, 1), 100);
+    const targetPage = Math.max(Number(options.page) || 1, 1);
     const c = config();
     if (c) {
       let q = client.from("data_records").select("id,payload,date_text,month_text,updated_at").eq("collection", collection);
       q = applyWhere(q, options.where);
       const order = options.orderField === "month" ? "month_text" : options.orderField === "updatedAt" ? "updated_at" : "date_text";
-      q = q.order(order, { ascending: false, nullsFirst: false }).order("id", { ascending: false }).limit(pageSize);
-      if (options.cursor?.primaryValue) q = q.lt(order, String(options.cursor.primaryValue));
+      q = q.order(order, { ascending: false, nullsFirst: false }).order("updated_at", { ascending: false }).order("id", { ascending: false });
+      const from = (targetPage - 1) * pageSize;
+      q = q.range(from, from + pageSize - 1);
       const { data, error } = await q;
       if (error) {
         console.error("Supabase getPage error for " + collection + ":", error);
@@ -358,40 +360,110 @@
     return () => {};
   }
   const subscribePage = subscribe;
-  async function getPatientIndexPage(pageKey, cursor) { return getPage(pageKey, { pageSize: 30, orderField: "updatedAt", cursor }); }
+  async function getPatientIndexPage(pageKey, cursor, targetPage = 1) {
+    return getPage(pageKey, { pageSize: 30, orderField: "date", cursor, page: targetPage });
+  }
   async function searchPatientIndex(pageKey, term) {
     await ready();
-    const collection = collectionName(pageKey), t = String(term || "").trim();
+    const collection = collectionName(pageKey), t = String(term || "").replace(/\s+/g, " ").trim();
     if (!t) return [];
-    try {
-      let q = client.from("data_records").select("id,payload").eq("collection", collection).limit(30);
-      if (/^\d+$/.test(t)) q = q.eq("payload->>fileNo", t);
-      else if (/^[0-9+\-\s]+$/.test(t)) q = q.eq("payload->>phone", t);
-      else q = q.ilike("payload->>name", `%${t}%`);
-      const { data, error } = await q;
-      if (!error && Array.isArray(data)) { metric(pageKey, data.length); return data.map(record); }
-    } catch (_e) {}
+    const c = config();
+    if (c) {
+      try {
+        const queries = [];
+        if (/^\d+$/.test(t)) {
+          queries.push(client.from("data_records").select("id,payload,date_text,updated_at").eq("collection", collection).eq("payload->>fileNo", t).limit(30));
+        }
+        if (/^[0-9+\-\s]+$/.test(t) && t.length >= 3) {
+          queries.push(client.from("data_records").select("id,payload,date_text,updated_at").eq("collection", collection).ilike("payload->>phone", `%${t}%`).limit(30));
+        }
+        queries.push(client.from("data_records").select("id,payload,date_text,updated_at").eq("collection", collection).ilike("payload->>name", `%${t}%`).limit(30));
+        const alt = t.startsWith("ا") ? "أ" + t.slice(1) : t.startsWith("أ") ? "ا" + t.slice(1) : null;
+        if (alt) {
+          queries.push(client.from("data_records").select("id,payload,date_text,updated_at").eq("collection", collection).ilike("payload->>name", `%${alt}%`).limit(30));
+        }
+        const snaps = await Promise.all(queries);
+        const map = new Map();
+        for (const snap of snaps) {
+          if (snap.data && Array.isArray(snap.data)) {
+            for (const row of snap.data) {
+              if (!map.has(row.id)) map.set(row.id, record(row));
+            }
+          }
+        }
+        if (map.size) {
+          metric(pageKey, map.size);
+          return Array.from(map.values()).sort((a, b) => {
+            const da = a.lastVisitDate || a.date || "";
+            const db = b.lastVisitDate || b.date || "";
+            return db.localeCompare(da);
+          });
+        }
+      } catch (_e) {}
+    }
     const rows = readMockRows().filter(r => r.collection === collection && String(r.payload?.name || "").toLowerCase().includes(t.toLowerCase())).slice(0, 30);
     metric(pageKey, rows.length);
     return rows.map(record);
   }
   async function savePatientToIndex(visit, isDental = false) {
-    const name = String(visit?.patient || visit?.name || "").trim(), phone = String(visit?.phone || "").trim(), fileNo = String(visit?.fileNo || "").trim();
-    if (!name && !phone && !fileNo) return null;
-    const id = (fileNo ? `F:${fileNo}` : `N:${name.toLowerCase()}|${phone}`).replace(/\//g, "_").slice(0, 120);
-    return upsertRecord(isDental ? "patientFilesDental" : "patientFilesClinic", {
-      id, name, phone, fileNo, patientKey: id,
-      lastVisitDate: visit.date || new Date().toISOString().slice(0, 10),
-      lastVisitCreatedAt: visit.createdAt || new Date().toISOString(),
-      updatedAt: visit.createdAt || new Date().toISOString()
-    });
+    const rawName = String(visit?.patient || visit?.name || "").replace(/\s+/g, " ").trim();
+    const phone = String(visit?.phone || "").trim();
+    const fileNo = String(visit?.fileNo || "").trim();
+    if (!rawName && !phone && !fileNo) return null;
+    const id = (fileNo ? `F:${fileNo}` : `N:${rawName.toLowerCase()}|${phone}`).replace(/\//g, "_").slice(0, 120);
+    const visitDate = visit.date || new Date().toISOString().slice(0, 10);
+    const visitCreatedAt = visit.createdAt || new Date().toISOString();
+    const collectionKey = isDental ? "patientFilesDental" : "patientFilesClinic";
+    const collName = isDental ? "patient_file_index_dental" : "patient_file_index_clinic";
+
+    let existing = null;
+    const c = config();
+    if (c) {
+      try {
+        const { data } = await client.from("data_records").select("id,payload").eq("collection", collName).eq("id", id).maybeSingle();
+        if (data?.payload) existing = data.payload;
+      } catch (_e) {}
+    }
+
+    const paid = Number(visit.paid || 0);
+    const total = Number(visit.total || 0);
+    const due = Math.max(0, total - paid);
+
+    let doc;
+    if (existing) {
+      const isNewer = !existing.lastVisitDate || visitDate >= existing.lastVisitDate;
+      doc = {
+        ...existing,
+        name: rawName || existing.name,
+        phone: phone || existing.phone,
+        fileNo: fileNo || existing.fileNo,
+        patientKey: id,
+        lastVisitDate: isNewer ? visitDate : existing.lastVisitDate,
+        lastVisitCreatedAt: isNewer ? visitCreatedAt : existing.lastVisitCreatedAt,
+        updatedAt: isNewer ? visitCreatedAt : existing.updatedAt,
+        visitsCount: (Number(existing.visitsCount) || 1) + 1,
+        totalPaid: (Number(existing.totalPaid) || 0) + paid,
+        totalDue: Math.max(0, (Number(existing.totalDue) || 0) + due)
+      };
+    } else {
+      doc = {
+        id, name: rawName, phone, fileNo, patientKey: id,
+        lastVisitDate: visitDate,
+        lastVisitCreatedAt: visitCreatedAt,
+        updatedAt: visitCreatedAt,
+        visitsCount: 1,
+        totalPaid: paid,
+        totalDue: due
+      };
+    }
+    return upsertRecord(collectionKey, doc);
   }
   async function getPatientVisits(kind, filter = {}) {
     await ready();
     const coll = (kind === "dental" || kind === "أسنان" || kind === "visitsDental" || kind === "patientFilesDental")
       ? "visits_dental"
       : "visits_clinic";
-    const name = String(filter.name || filter.patient || "").trim();
+    const name = String(filter.name || filter.patient || "").replace(/\s+/g, " ").trim();
     const phone = String(filter.phone || "").trim();
     const fileNo = String(filter.fileNo || "").trim();
     const c = config();
@@ -399,15 +471,15 @@
       try {
         const queries = [];
         if (fileNo) {
-          queries.push(client.from("data_records").select("id,payload").eq("collection", coll).eq("payload->>fileNo", fileNo));
+          queries.push(client.from("data_records").select("id,payload,date_text,created_at").eq("collection", coll).eq("payload->>fileNo", fileNo));
         }
-        if (phone) {
-          queries.push(client.from("data_records").select("id,payload").eq("collection", coll).eq("payload->>phone", phone));
+        if (phone && phone.length >= 4) {
+          queries.push(client.from("data_records").select("id,payload,date_text,created_at").eq("collection", coll).eq("payload->>phone", phone));
         }
         if (name) {
-          queries.push(client.from("data_records").select("id,payload").eq("collection", coll).ilike("payload->>patient", `%${name}%`));
+          queries.push(client.from("data_records").select("id,payload,date_text,created_at").eq("collection", coll).ilike("payload->>patient", `%${name}%`));
           const alt = name.startsWith("ا") ? "أ" + name.slice(1) : name.startsWith("أ") ? "ا" + name.slice(1) : null;
-          if (alt) queries.push(client.from("data_records").select("id,payload").eq("collection", coll).ilike("payload->>patient", `%${alt}%`));
+          if (alt) queries.push(client.from("data_records").select("id,payload,date_text,created_at").eq("collection", coll).ilike("payload->>patient", `%${alt}%`));
         }
         if (queries.length) {
           const snaps = await Promise.all(queries);
@@ -419,8 +491,13 @@
               }
             }
           }
-          metric(coll, map.size);
-          return Array.from(map.values());
+          const sorted = Array.from(map.values()).sort((a, b) => {
+            const da = a.date || a.createdAt || "";
+            const db = b.date || b.createdAt || "";
+            return db.localeCompare(da);
+          });
+          metric(coll, sorted.length);
+          return sorted;
         }
       } catch (_e) {
         console.warn("Supabase getPatientVisits failed:", _e);
@@ -441,7 +518,7 @@
       let allVisits = [];
       let from = 0;
       while (true) {
-        const { data, error } = await client.from("data_records").select("id,payload").eq("collection", t.visitColl).range(from, from + 999);
+        const { data, error } = await client.from("data_records").select("id,payload,date_text,created_at").eq("collection", t.visitColl).range(from, from + 999);
         if (error || !data) break;
         allVisits = allVisits.concat(data);
         if (data.length < 1000) break;
@@ -450,20 +527,20 @@
       const indexMap = new Map();
       for (const row of allVisits) {
         const v = row.payload || {};
-        const name = String(v.patient || v.name || "").trim();
+        const rawName = String(v.patient || v.name || "").replace(/\s+/g, " ").trim();
         const phone = String(v.phone || "").trim();
         const fileNo = String(v.fileNo || "").trim();
-        if (!name && !phone && !fileNo) continue;
-        const id = (fileNo ? `F:${fileNo}` : `N:${name.toLowerCase()}|${phone}`).replace(/\//g, "_").slice(0, 120);
-        const visitDate = v.date || (v.createdAt ? v.createdAt.slice(0, 10) : "");
-        const createdAt = v.createdAt || new Date().toISOString();
+        if (!rawName && !phone && !fileNo) continue;
+        const id = (fileNo ? `F:${fileNo}` : `N:${rawName.toLowerCase()}|${phone}`).replace(/\//g, "_").slice(0, 120);
+        const visitDate = v.date || row.date_text || (row.created_at ? row.created_at.slice(0, 10) : "");
+        const createdAt = v.createdAt || row.created_at || new Date().toISOString();
         const paid = Number(v.paid || 0);
         const total = Number(v.total || 0);
         const due = Math.max(0, total - paid);
         const existing = indexMap.get(id);
         if (!existing) {
           indexMap.set(id, {
-            id, name, phone, fileNo, patientKey: id,
+            id, name: rawName, phone, fileNo, patientKey: id,
             lastVisitDate: visitDate, lastVisitCreatedAt: createdAt, updatedAt: createdAt,
             visitsCount: 1, totalPaid: paid, totalDue: due
           });
@@ -471,11 +548,13 @@
           existing.visitsCount += 1;
           existing.totalPaid += paid;
           existing.totalDue += due;
-          if (visitDate && (!existing.lastVisitDate || visitDate >= existing.lastVisitDate)) {
+          if (!existing.lastVisitDate || (visitDate && visitDate > existing.lastVisitDate) || (visitDate === existing.lastVisitDate && createdAt > existing.lastVisitCreatedAt)) {
             existing.lastVisitDate = visitDate;
             existing.lastVisitCreatedAt = createdAt;
             existing.updatedAt = createdAt;
           }
+          if (!existing.phone && phone) existing.phone = phone;
+          if (!existing.fileNo && fileNo) existing.fileNo = fileNo;
         }
       }
       const rows = Array.from(indexMap.values()).map(p => ({
@@ -484,7 +563,7 @@
         payload: p,
         date_text: p.lastVisitDate || null,
         month_text: p.lastVisitDate ? p.lastVisitDate.slice(0, 7) : null,
-        updated_at: p.updatedAt || new Date().toISOString()
+        updated_at: p.lastVisitCreatedAt || p.updatedAt || new Date().toISOString()
       }));
       for (let i = 0; i < rows.length; i += 200) {
         const chunk = rows.slice(i, i + 200);

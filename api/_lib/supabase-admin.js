@@ -336,7 +336,24 @@ async function profile(admin, uid) {
   return p;
 }
 function permissions(value) { return value && typeof value === 'object' ? value : {}; }
+function cleanPermissions(value) {
+  const p = JSON.parse(JSON.stringify(permissions(value)));
+  if (p.clinic?.add || p.clinic?.edit) {
+    p.patientFilesClinic = { ...(p.patientFilesClinic || {}), view: true, add: true, edit: true };
+  } else if (p.clinic?.view) {
+    p.patientFilesClinic = { ...(p.patientFilesClinic || {}), view: true };
+  }
+  if (p.dental?.add || p.dental?.edit) {
+    p.patientFilesDental = { ...(p.patientFilesDental || {}), view: true, add: true, edit: true };
+  } else if (p.dental?.view) {
+    p.patientFilesDental = { ...(p.patientFilesDental || {}), view: true };
+  }
+  p.doctors = { ...(p.doctors || {}), view: true };
+  p.categories = { ...(p.categories || {}), view: true };
+  p.specialties = { ...(p.specialties || {}), view: true };
+  p.settings = { ...(p.settings || {}), view: true };
+  return p;
+}
 function publicProfile(p) { if (!p) return null; return { id: p.id, firebaseUid: p.id, displayName: p.display_name || '', username: p.username || '', role: p.role || 'موظف', status: p.status || 'نشط', permissions: permissions(p.permissions), credentialVersion: p.credential_version || 1, securityVersion: p.security_version || 1, createdAt: p.created_at, lastLogin: p.last_login, lastPasswordChangeAt: p.last_password_change_at, updatedAt: p.updated_at }; }
-function cleanPermissions(value) { return permissions(value); }
 async function requireManager(req) { const { admin, user } = await userFromRequest(req); const p = await profile(admin, user.id); if (!p || p.status === 'موقوف' || p.role !== 'مدير') throw Object.assign(new Error('Manager access required'), { status: 403 }); return { admin, user, profile: p }; }
 module.exports = { getAdmin, bearer, userFromRequest, profile, publicProfile, fullPermissions, cleanPermissions, requireManager, mockStore };
