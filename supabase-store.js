@@ -359,8 +359,141 @@
   }
   const subscribePage = subscribe;
   async function getPatientIndexPage(pageKey, cursor) { return getPage(pageKey, { pageSize: 30, orderField: "updatedAt", cursor }); }
-  async function searchPatientIndex(pageKey, term) { await ready(); const collection = collectionName(pageKey), t = String(term || "").trim(); if (!t) return []; try { let q = client.from("data_records").select("id,payload").eq("collection", collection).limit(30); if (/^\d+$/.test(t)) q = q.eq("payload->>fileNo", t); else if (/^[0-9+\-\s]+$/.test(t)) q = q.eq("payload->>phone", t); else q = q.ilike("payload->>name", `${t}%`); const { data, error } = await q; if (!error && Array.isArray(data)) { metric(pageKey, data.length); return data.map(record); } } catch (_e) {} const rows = readMockRows().filter(r => r.collection === collection && String(r.payload?.name || "").toLowerCase().includes(t.toLowerCase())).slice(0, 30); metric(pageKey, rows.length); return rows.map(record); }
-  async function savePatientToIndex(visit, isDental = false) { const name = String(visit?.patient || visit?.name || "").trim(), phone = String(visit?.phone || "").trim(), fileNo = String(visit?.fileNo || "").trim(); if (!name && !phone && !fileNo) return null; const id = (fileNo ? `F:${fileNo}` : `N:${name.toLowerCase()}|${phone}`).replace(/\//g, "_").slice(0, 120); return upsertRecord(isDental ? "patientFilesDental" : "patientFilesClinic", { id, name, phone, fileNo, patientKey: id, lastVisitDate: visit.date || new Date().toISOString().slice(0, 10), lastVisitCreatedAt: visit.createdAt || new Date().toISOString(), updatedAt: visit.createdAt || new Date().toISOString() }); }
+  async function searchPatientIndex(pageKey, term) {
+    await ready();
+    const collection = collectionName(pageKey), t = String(term || "").trim();
+    if (!t) return [];
+    try {
+      let q = client.from("data_records").select("id,payload").eq("collection", collection).limit(30);
+      if (/^\d+$/.test(t)) q = q.eq("payload->>fileNo", t);
+      else if (/^[0-9+\-\s]+$/.test(t)) q = q.eq("payload->>phone", t);
+      else q = q.ilike("payload->>name", `%${t}%`);
+      const { data, error } = await q;
+      if (!error && Array.isArray(data)) { metric(pageKey, data.length); return data.map(record); }
+    } catch (_e) {}
+    const rows = readMockRows().filter(r => r.collection === collection && String(r.payload?.name || "").toLowerCase().includes(t.toLowerCase())).slice(0, 30);
+    metric(pageKey, rows.length);
+    return rows.map(record);
+  }
+  async function savePatientToIndex(visit, isDental = false) {
+    const name = String(visit?.patient || visit?.name || "").trim(), phone = String(visit?.phone || "").trim(), fileNo = String(visit?.fileNo || "").trim();
+    if (!name && !phone && !fileNo) return null;
+    const id = (fileNo ? `F:${fileNo}` : `N:${name.toLowerCase()}|${phone}`).replace(/\//g, "_").slice(0, 120);
+    return upsertRecord(isDental ? "patientFilesDental" : "patientFilesClinic", {
+      id, name, phone, fileNo, patientKey: id,
+      lastVisitDate: visit.date || new Date().toISOString().slice(0, 10),
+      lastVisitCreatedAt: visit.createdAt || new Date().toISOString(),
+      updatedAt: visit.createdAt || new Date().toISOString()
+    });
+  }
+  async function getPatientVisits(kind, filter = {}) {
+    await ready();
+    const coll = (kind === "dental" || kind === "أسنان" || kind === "visitsDental" || kind === "patientFilesDental")
+      ? "visits_dental"
+      : "visits_clinic";
+    const name = String(filter.name || filter.patient || "").trim();
+    const phone = String(filter.phone || "").trim();
+    const fileNo = String(filter.fileNo || "").trim();
+    const c = config();
+    if (c) {
+      try {
+        const queries = [];
+        if (fileNo) {
+          queries.push(client.from("data_records").select("id,payload").eq("collection", coll).eq("payload->>fileNo", fileNo));
+        }
+        if (phone) {
+          queries.push(client.from("data_records").select("id,payload").eq("collection", coll).eq("payload->>phone", phone));
+        }
+        if (name) {
+          queries.push(client.from("data_records").select("id,payload").eq("collection", coll).ilike("payload->>patient", `%${name}%`));
+          const alt = name.startsWith("ا") ? "أ" + name.slice(1) : name.startsWith("أ") ? "ا" + name.slice(1) : null;
+          if (alt) queries.push(client.from("data_records").select("id,payload").eq("collection", coll).ilike("payload->>patient", `%${alt}%`));
+        }
+        if (queries.length) {
+          const snaps = await Promise.all(queries);
+          const map = new Map();
+          for (const snap of snaps) {
+            if (snap.data && Array.isArray(snap.data)) {
+              for (const row of snap.data) {
+                if (!map.has(row.id)) map.set(row.id, record(row));
+              }
+            }
+          }
+          metric(coll, map.size);
+          return Array.from(map.values());
+        }
+      } catch (_e) {
+        console.warn("Supabase getPatientVisits failed:", _e);
+      }
+    }
+    return [];
+  }
+  async function syncPatientIndexes(specificKind = null) {
+    await ready();
+    const c = config();
+    if (!c) return { clinic: 0, dental: 0 };
+    const targets = [];
+    if (!specificKind || specificKind === "clinic" || specificKind === "عيادات") targets.push({ visitColl: "visits_clinic", indexColl: "patient_file_index_clinic" });
+    if (!specificKind || specificKind === "dental" || specificKind === "أسنان") targets.push({ visitColl: "visits_dental", indexColl: "patient_file_index_dental" });
+
+    const counts = {};
+    for (const t of targets) {
+      let allVisits = [];
+      let from = 0;
+      while (true) {
+        const { data, error } = await client.from("data_records").select("id,payload").eq("collection", t.visitColl).range(from, from + 999);
+        if (error || !data) break;
+        allVisits = allVisits.concat(data);
+        if (data.length < 1000) break;
+        from += 1000;
+      }
+      const indexMap = new Map();
+      for (const row of allVisits) {
+        const v = row.payload || {};
+        const name = String(v.patient || v.name || "").trim();
+        const phone = String(v.phone || "").trim();
+        const fileNo = String(v.fileNo || "").trim();
+        if (!name && !phone && !fileNo) continue;
+        const id = (fileNo ? `F:${fileNo}` : `N:${name.toLowerCase()}|${phone}`).replace(/\//g, "_").slice(0, 120);
+        const visitDate = v.date || (v.createdAt ? v.createdAt.slice(0, 10) : "");
+        const createdAt = v.createdAt || new Date().toISOString();
+        const paid = Number(v.paid || 0);
+        const total = Number(v.total || 0);
+        const due = Math.max(0, total - paid);
+        const existing = indexMap.get(id);
+        if (!existing) {
+          indexMap.set(id, {
+            id, name, phone, fileNo, patientKey: id,
+            lastVisitDate: visitDate, lastVisitCreatedAt: createdAt, updatedAt: createdAt,
+            visitsCount: 1, totalPaid: paid, totalDue: due
+          });
+        } else {
+          existing.visitsCount += 1;
+          existing.totalPaid += paid;
+          existing.totalDue += due;
+          if (visitDate && (!existing.lastVisitDate || visitDate >= existing.lastVisitDate)) {
+            existing.lastVisitDate = visitDate;
+            existing.lastVisitCreatedAt = createdAt;
+            existing.updatedAt = createdAt;
+          }
+        }
+      }
+      const rows = Array.from(indexMap.values()).map(p => ({
+        collection: t.indexColl,
+        id: p.id,
+        payload: p,
+        date_text: p.lastVisitDate || null,
+        month_text: p.lastVisitDate ? p.lastVisitDate.slice(0, 7) : null,
+        updated_at: p.updatedAt || new Date().toISOString()
+      }));
+      for (let i = 0; i < rows.length; i += 200) {
+        const chunk = rows.slice(i, i + 200);
+        await client.from("data_records").upsert(chunk, { onConflict: "collection,id" });
+      }
+      counts[t.indexColl] = rows.length;
+    }
+    return counts;
+  }
   async function profileRequest(action, body = {}) {
     let token = "";
     try { token = await accessToken(); } catch (_e) {}
@@ -406,6 +539,6 @@
   const adminWipeBusinessData = confirmationText => adminRequest({ action: "wipeBusinessData", confirmationText });
   const adminAccountRequest = adminRequest;
   const isMockMode = () => !config();
-  window.getPatientIndexPage = getPatientIndexPage; window.searchPatientIndex = searchPatientIndex; window.savePatientToIndex = savePatientToIndex;
-  window.MitaliSupabase = window.MitaliFirebase = Object.freeze({ config: Object.freeze({ provider: "supabase" }), collections: COLLECTIONS, init, ready, waitForAuth, isMockMode, getTable, getPage, getPatientIndexPage, searchPatientIndex, savePatientToIndex, setTable, getValue, setValue, upsertRecord, upsertRecords, deleteRecords, subscribe, subscribePage, authEmailForUsername, signInWithUsername, changePassword, getFinancialSummary, getReportsData, getDoctorMonthReport, getMonthRecords, adminCreateAccount, configureManagerRecovery, recoverManagerPassword, adminUpdateAccount, adminListAccounts, adminDeleteAccount, adminAccountRequest, adminWipeBusinessData, signOut, authUser: currentUser, getUserProfile, ensureAdminProfile, updateOwnSecurityMetadata, getReadMetrics: () => JSON.parse(JSON.stringify(READ_METRICS)), resetReadMetrics: () => { READ_METRICS.queries = 0; READ_METRICS.documents = 0; READ_METRICS.byKey = {}; READ_METRICS.lastReadAt = null; } });
+  window.getPatientIndexPage = getPatientIndexPage; window.searchPatientIndex = searchPatientIndex; window.savePatientToIndex = savePatientToIndex; window.getPatientVisits = getPatientVisits; window.syncPatientIndexes = syncPatientIndexes;
+  window.MitaliSupabase = window.MitaliFirebase = Object.freeze({ config: Object.freeze({ provider: "supabase" }), collections: COLLECTIONS, init, ready, waitForAuth, isMockMode, getTable, getPage, getPatientIndexPage, searchPatientIndex, savePatientToIndex, getPatientVisits, syncPatientIndexes, setTable, getValue, setValue, upsertRecord, upsertRecords, deleteRecords, subscribe, subscribePage, authEmailForUsername, signInWithUsername, changePassword, getFinancialSummary, getReportsData, getDoctorMonthReport, getMonthRecords, adminCreateAccount, configureManagerRecovery, recoverManagerPassword, adminUpdateAccount, adminListAccounts, adminDeleteAccount, adminAccountRequest, adminWipeBusinessData, signOut, authUser: currentUser, getUserProfile, ensureAdminProfile, updateOwnSecurityMetadata, getReadMetrics: () => JSON.parse(JSON.stringify(READ_METRICS)), resetReadMetrics: () => { READ_METRICS.queries = 0; READ_METRICS.documents = 0; READ_METRICS.byKey = {}; READ_METRICS.lastReadAt = null; } });
 })();

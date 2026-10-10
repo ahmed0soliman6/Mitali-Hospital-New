@@ -4910,8 +4910,21 @@ async function loadPatientIndexPage(pageKey, targetPage) {
     const cursor = pageState.cursors[targetPage] || null;
     const fetcher = (window.MitaliSupabase && window.MitaliSupabase.getPatientIndexPage) || (typeof getPatientIndexPage === "function" ? getPatientIndexPage : null);
     if (!fetcher) throw new Error("getPatientIndexPage is not available");
-    const rawRes = await fetcher(pageKey, cursor);
-    const res = (rawRes && typeof rawRes === "object") ? rawRes : { records: [], hasMore: false, nextCursor: null };
+    let rawRes = await fetcher(pageKey, cursor);
+    let res = (rawRes && typeof rawRes === "object") ? rawRes : { records: [], hasMore: false, nextCursor: null };
+
+    // فحص تلقائي ذكي: لو كانت الصفحة الأولى فارغة تمامًا، نقوم بالمزامنة التلقائية للفهرس من جدول الزيارات
+    if (targetPage === 1 && (!res.records || !res.records.length) && window.MitaliSupabase && typeof window.MitaliSupabase.syncPatientIndexes === "function") {
+      try {
+        console.log("Patient index empty, auto-syncing from visits...");
+        await window.MitaliSupabase.syncPatientIndexes(pageKey === "patientFilesDental" ? "dental" : "clinic");
+        rawRes = await fetcher(pageKey, null);
+        res = (rawRes && typeof rawRes === "object") ? rawRes : { records: [], hasMore: false, nextCursor: null };
+      } catch (syncErr) {
+        console.warn("Auto-sync patient index failed:", syncErr);
+      }
+    }
+
     pageState.pages[targetPage] = Array.isArray(res.records) ? res.records : [];
     pageState.hasMore[targetPage] = !!res.hasMore;
     if (res.nextCursor) {
@@ -4940,40 +4953,23 @@ async function loadPatientVisitsById(patientId, kind, patientRecord) {
   const pPhone = String((patientRecord && patientRecord.phone) || (/\|(.+)$/.exec(patientId)?.[1]) || "").trim();
   const pFileNo = String((patientRecord && patientRecord.fileNo) || (/^F:(.+)$/.exec(patientId)?.[1]) || (/^\d+$/.test(patientId) ? patientId : "")).trim();
 
-  if (typeof window.__legacySupabaseDisabled !== "undefined" && window.__legacySupabaseDisabled.firestore) {
+  // 1. جلب الزيارات مباشرة من Supabase لضمان ظهور كافة الزيارات التاريخية للمريض عبر كافة الشهور
+  if (window.MitaliSupabase && typeof window.MitaliSupabase.getPatientVisits === "function") {
     try {
-      const db = window.__legacySupabaseDisabled.firestore();
-      const queries = [];
-      if (pName) {
-        queries.push(db.collection(collName).where("patient", "==", pName).get());
-        const altName = pName.startsWith('ا') ? 'أ' + pName.slice(1) : pName.startsWith('أ') ? 'ا' + pName.slice(1) : null;
-        if (altName) queries.push(db.collection(collName).where("patient", "==", altName).get());
+      const serverVisits = await window.MitaliSupabase.getPatientVisits(kind, { name: pName, phone: pPhone, fileNo: pFileNo, patientId });
+      if (Array.isArray(serverVisits)) {
+        serverVisits.forEach(v => {
+          if (!visitMap.has(v.id)) {
+            visitMap.set(v.id, { ...v, kind, kindKey: listKey });
+          }
+        });
       }
-      if (pFileNo) {
-        queries.push(db.collection(collName).where("fileNo", "==", pFileNo).get());
-      }
-      if (pPhone) {
-        queries.push(db.collection(collName).where("phone", "==", pPhone).get());
-      }
-      if (/^\d+$/.test(patientId) && patientId !== pFileNo) {
-        queries.push(db.collection(collName).where("fileNo", "==", patientId).get());
-      }
-
-      const snapshots = await Promise.all(queries);
-      snapshots.forEach(snap => {
-        if (!snap.empty) {
-          snap.docs.forEach(d => {
-            if (!visitMap.has(d.id)) {
-              visitMap.set(d.id, { id: d.id, ...d.data(), kind, kindKey: listKey });
-            }
-          });
-        }
-      });
     } catch (err) {
-      console.warn("Firestore patient visits fetch failed, checking local DB:", err);
+      console.warn("Supabase getPatientVisits failed, checking local DB:", err);
     }
   }
 
+  // 2. دمج أي زيارات محلية مضافة حديثًا في الذاكرة
   if (Array.isArray(DB[listKey])) {
     DB[listKey].forEach(v => {
       const vName = String(v.patient || v.name || "").trim();
@@ -6965,6 +6961,11 @@ function renderSettings() {
         <p style="font-size:12px; color:var(--muted); margin-bottom:8px;">في حال كانت حركات الوارد موجودة ولكن الزيارات لا تظهر في اليوميات، يقوم هذا الإجراء بفحص سجل الوارد واستعادة ومزامنة جميع زيارات العيادات والأسنان والعمليات والتحاليل والأشعة تلقائيًا إلى اليوميات.</p>
         <button type="button" class="btn sm ghost" id="reconstructVisitsFromIncomeBtn" ${isAdminUser() ? "" : "disabled"}>🔄 استعادة ومزامنة الزيارات من قيود الوارد الآن</button>
       </div>
+      <div style="margin-top:14px; padding-top:12px; border-top:1px dashed var(--border,#eee);">
+        <div style="font-weight:700; font-size:13px; margin-bottom:4px; color:var(--accent,#0284c7);">👥 مزامنة وفهرسة ملفات المرضى من الزيارات</div>
+        <p style="font-size:12px; color:var(--muted); margin-bottom:8px;">يقوم هذا الإجراء بفحص سجلات زيارات العيادات والأسنان وإعادة بناء بطاقات وفهارس ملفات المرضى تلقائيًا لضمان ظهور كافة المرضى في قائمة ملفات المرضى والبحث.</p>
+        <button type="button" class="btn sm ghost" id="syncPatientIndexesBtn" ${isAdminUser() ? "" : "disabled"}>👥 مزامنة وإعادة بناء ملفات المرضى الآن</button>
+      </div>
     </div>` : ""}
 
     ${can("categories","view") ? `
@@ -7433,6 +7434,13 @@ function renderSettings() {
         } else {
           saveToast("تمت الاستعادة بنجاح");
         }
+        if (window.MitaliSupabase && typeof window.MitaliSupabase.syncPatientIndexes === "function") {
+          try { await window.MitaliSupabase.syncPatientIndexes(); } catch (_e) {}
+        }
+        PATIENT_FILE_PAGE_STATE.patientFilesClinic.pages = {};
+        PATIENT_FILE_PAGE_STATE.patientFilesDental.pages = {};
+        PATIENT_FILE_VISITS_CACHE.patientFilesClinic = {};
+        PATIENT_FILE_VISITS_CACHE.patientFilesDental = {};
         restoreBackupInput.value = "";
         route();
       })();
@@ -7512,12 +7520,41 @@ function renderSettings() {
           await window.MitaliSupabase.upsertRecords(key, records);
         }
       }
+      if (window.MitaliSupabase && typeof window.MitaliSupabase.syncPatientIndexes === "function") {
+        try { await window.MitaliSupabase.syncPatientIndexes(); } catch (_e) {}
+      }
+      PATIENT_FILE_PAGE_STATE.patientFilesClinic.pages = {};
+      PATIENT_FILE_PAGE_STATE.patientFilesDental.pages = {};
+      PATIENT_FILE_VISITS_CACHE.patientFilesClinic = {};
+      PATIENT_FILE_VISITS_CACHE.patientFilesDental = {};
       logActivity(`استعادة ${totalRestored} زيارة من سجل الوارد`, "settings");
-      saveToast(`تمت العملية بنجاح — تم استعادة ومزامنة ${totalRestored} زيارة إلى اليوميات`);
+      saveToast(`تمت العملية بنجاح — تم استعادة ومزامنة ${totalRestored} زيارة إلى اليوميات وفهرسة ملفات المرضى`);
       route();
     } catch (e) {
       console.error("Reconstruct visits failed:", e);
       showToast("⚠️ تعذّرت الاستعادة: " + (e.message || "خطأ غير معروف"), 5000);
+    }
+  });
+
+  const syncPatientIndexesBtn = document.getElementById("syncPatientIndexesBtn");
+  if (syncPatientIndexesBtn) syncPatientIndexesBtn.addEventListener("click", async () => {
+    if (!isAdminUser()) { showToast("⚠️ العملية متاحة للمدير فقط"); return; }
+    if (!confirm("هل تريد إعادة بناء ومزامنة فهرس ملفات المرضى من جميع سجلات الزيارات المسجلة؟")) return;
+    showToast("⏳ جارٍ فحص الزيارات ومزامنة ملفات المرضى...", 45000);
+    try {
+      if (!window.MitaliSupabase || typeof window.MitaliSupabase.syncPatientIndexes !== "function") {
+        throw new Error("Supabase adapter is not ready");
+      }
+      const res = await window.MitaliSupabase.syncPatientIndexes();
+      PATIENT_FILE_PAGE_STATE.patientFilesClinic.pages = {};
+      PATIENT_FILE_PAGE_STATE.patientFilesDental.pages = {};
+      PATIENT_FILE_VISITS_CACHE.patientFilesClinic = {};
+      PATIENT_FILE_VISITS_CACHE.patientFilesDental = {};
+      saveToast(`تمت مزامنة ملفات المرضى بنجاح — تم تحديث ${(res.patient_file_index_clinic || 0) + (res.patient_file_index_dental || 0)} ملف مريض`);
+      route();
+    } catch (err) {
+      console.error("Sync patient indexes failed:", err);
+      showToast("⚠️ تعذّرت مزامنة ملفات المرضى: " + (err.message || "خطأ غير معروف"), 5000);
     }
   });
 
