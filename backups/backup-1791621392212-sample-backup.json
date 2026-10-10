@@ -1,0 +1,1 @@
+{"doctors":[{"id":"d1","name":"دكتور أحمد","specialty":"عيون"}],"visitsClinic":[{"id":"v1","patient":"محمد علي","date":"2026-10-01","paid":150}],"income":[{"id":"inc1","amount":150,"date":"2026-10-01"}],"staffAccounts":[{"username":"doctor1","displayName":"دكتور أحمد","role":"موظف"}]}

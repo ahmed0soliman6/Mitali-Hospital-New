@@ -1,19 +1,29 @@
 const { getAdmin, requireManager, userFromRequest, profile, publicProfile, fullPermissions, cleanPermissions, mockStore } = require('../_lib/supabase-admin');
 function emailFor(username) { const b = Buffer.from(String(username || '').trim().toLowerCase(), 'utf8').toString('base64').replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); return `u-${b}@accounts.mitali-hospital.internal`; }
 function json(res, code, body) { return res.status(code).setHeader('Cache-Control','no-store').json(body); }
+const isProd = process.env.NODE_ENV === 'production' || process.env.VERCEL === '1';
+
 async function create(admin, input) {
   const username = String(input.username || '').trim().toLowerCase(), password = String(input.password || '');
   if (!username || !input.displayName || password.length < 6) throw Object.assign(new Error('missing-or-invalid-account-fields'), { status: 400 });
   let auId = `user-${Date.now()}`;
   try {
     const { data: au, error: ae } = await admin.auth.admin.createUser({ email: emailFor(username), password, email_confirm: true, user_metadata: { display_name: input.displayName } });
-    if (!ae && au?.user?.id) auId = au.user.id;
-  } catch (_e) {}
+    if (ae) throw ae;
+    if (au?.user?.id) auId = au.user.id;
+  } catch (err) {
+    console.error("Auth createUser error:", err.message || err);
+    if (isProd) throw Object.assign(new Error(err.message || 'auth-create-user-failed'), { status: 400 });
+  }
   const row = { id: auId, username, display_name: String(input.displayName), role: input.role === 'مدير' ? 'مدير' : 'موظف', status: input.status === 'موقوف' ? 'موقوف' : 'نشط', permissions: input.role === 'مدير' ? fullPermissions() : cleanPermissions(input.permissions), credential_version: 1, security_version: 1, created_at: new Date().toISOString().slice(0, 10), updated_at: new Date().toISOString() };
   try {
     const { data, error } = await admin.from('profiles').insert(row).select().single();
-    if (!error && data) return publicProfile(data);
-  } catch (_e) {}
+    if (error) throw error;
+    if (data) return publicProfile(data);
+  } catch (err) {
+    console.error("Profiles insert error:", err.message || err);
+    if (isProd) throw Object.assign(new Error(err.message || 'profile-insert-failed'), { status: 500 });
+  }
   mockStore.profiles.set(row.id, row);
   return publicProfile(row);
 }
@@ -29,11 +39,20 @@ async function update(admin, input) {
     authPatch.password = String(input.password);
     patch.last_password_change_at = new Date().toISOString();
   }
-  try { await admin.auth.admin.updateUserById(uid, authPatch); } catch (_e) {}
+  try {
+    const { error: authErr } = await admin.auth.admin.updateUserById(uid, authPatch);
+    if (authErr) console.error("Auth updateUserById error:", authErr.message || authErr);
+  } catch (err) {
+    console.error("Auth updateUserById exception:", err.message || err);
+  }
   try {
     const { data, error } = await admin.from('profiles').update(patch).eq('id', uid).select().single();
-    if (!error && data) return publicProfile(data);
-  } catch (_e) {}
+    if (error) throw error;
+    if (data) return publicProfile(data);
+  } catch (err) {
+    console.error("Profiles update error:", err.message || err);
+    if (isProd) throw Object.assign(new Error(err.message || 'profile-update-failed'), { status: 500 });
+  }
   const merged = Object.assign(current, patch);
   mockStore.profiles.set(uid, merged);
   return publicProfile(merged);
@@ -44,8 +63,12 @@ module.exports = async function handler(req, res) {
       const { admin } = await requireManager(req);
       try {
         const { data, error } = await admin.from('profiles').select('*').order('created_at');
-        if (!error && Array.isArray(data)) return json(res, 200, { accounts: data.map(publicProfile) });
-      } catch (_e) {}
+        if (error) throw error;
+        if (Array.isArray(data)) return json(res, 200, { accounts: data.map(publicProfile) });
+      } catch (err) {
+        console.error("Profiles fetch error:", err.message || err);
+        if (isProd) throw Object.assign(new Error(err.message || 'profiles-fetch-failed'), { status: 500 });
+      }
       const accounts = Array.from(mockStore.profiles.values()).map(publicProfile);
       return json(res, 200, { accounts });
     }
@@ -57,9 +80,20 @@ module.exports = async function handler(req, res) {
     if (input.action === 'delete') {
       const uid = String(input.uid || '');
       if (!uid) throw Object.assign(new Error('missing-uid'), { status: 400 });
-      try { await admin.from('profiles').delete().eq('id', uid); } catch (_e) {}
+      try {
+        const { error: delProfileErr } = await admin.from('profiles').delete().eq('id', uid);
+        if (delProfileErr) console.error("Profiles delete error:", delProfileErr.message || delProfileErr);
+      } catch (delErr) {
+        console.error("Profiles delete exception:", delErr.message || delErr);
+        if (isProd) throw Object.assign(new Error(delErr.message || 'profile-delete-failed'), { status: 500 });
+      }
       mockStore.profiles.delete(uid);
-      try { await admin.auth.admin.deleteUser(uid); } catch (_e) {}
+      try {
+        const { error: delAuthErr } = await admin.auth.admin.deleteUser(uid);
+        if (delAuthErr) console.error("Auth deleteUser error:", delAuthErr.message || delAuthErr);
+      } catch (delAuthEx) {
+        console.error("Auth deleteUser exception:", delAuthEx.message || delAuthEx);
+      }
       return json(res, 200, { ok: true, deleted: { id: uid } });
     }
     if (['update','resetPassword','toggleStatus','permissions'].includes(input.action)) return json(res, 200, { ok: true, account: await update(admin, input) });

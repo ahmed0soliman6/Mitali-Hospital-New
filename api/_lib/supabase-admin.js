@@ -300,10 +300,18 @@ async function userFromRequest(req, admin = getAdmin()) {
 }
 
 async function profile(admin, uid) {
+  const isProd = process.env.NODE_ENV === 'production' || process.env.VERCEL === '1';
   try {
     const { data, error } = await admin.from('profiles').select('*').eq('id', uid).maybeSingle();
+    if (error) console.error("Database query for profile error:", error.message || error);
     if (!error && data) return data;
-  } catch (_e) {}
+  } catch (err) {
+    console.error("Profile fetch exception:", err.message || err);
+  }
+
+  if (isProd) {
+    return null;
+  }
 
   let p = mockStore.profiles.get(uid);
   if (!p) {

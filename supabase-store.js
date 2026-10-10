@@ -199,13 +199,25 @@
   async function adminRequest(payload, method = "POST") { const token = await accessToken(); return fetchJson("/api/admin/account", { method, headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: method === "GET" ? undefined : JSON.stringify(payload || {}) }); }
   function authEmailForUsername(username) { const encoded = btoa(unescape(encodeURIComponent(String(username || "").trim().toLowerCase()))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, ""); return `u-${encoded}@accounts.mitali-hospital.internal`; }
   async function signInWithUsername(username, password) {
-    try {
-      const { data, error } = await init().auth.signInWithPassword({ email: authEmailForUsername(username), password });
-      if (!error && data?.user) {
+    const c = config();
+    if (c) {
+      const email = authEmailForUsername(username);
+      const { data, error } = await init().auth.signInWithPassword({ email, password });
+      if (error) {
+        console.error("Supabase Auth signInWithPassword error:", error.message || error);
+        throw Object.assign(new Error(error.message || "اسم المستخدم أو كلمة المرور غير صحيحة"), {
+          code: error.code || "auth/invalid-credential"
+        });
+      }
+      if (data?.user) {
         currentSessionUser = data.user;
         return data.user;
       }
-    } catch (_err) {}
+      throw new Error("فشل استلام بيانات المستخدم من Supabase");
+    }
+    if (window.MITALI_IS_PROD) {
+      throw new Error("Supabase is not configured in production");
+    }
     const uname = String(username || "").trim().toLowerCase();
     const uid = uname === "admin" ? "supabase-admin" : `user-${uname}`;
     const user = { id: uid, uid, email: authEmailForUsername(username) };
@@ -223,13 +235,21 @@
   function currentUser() { init(); return currentSessionUser; }
   async function getTable(key) {
     await ready();
-    try {
+    const c = config();
+    if (c) {
       const { data, error } = await client.from("data_records").select("id,payload").eq("collection", collectionName(key)).order("updated_at", { ascending: false });
-      if (!error && Array.isArray(data)) {
+      if (error) {
+        console.error("Supabase getTable error for " + collectionName(key) + ":", error);
+        throw Object.assign(new Error(error.message || "Supabase getTable failed"), { code: error.code, table: collectionName(key) });
+      }
+      if (Array.isArray(data)) {
         metric(key, data.length);
         return data.map(record);
       }
-    } catch (_e) {}
+    }
+    if (window.MITALI_IS_PROD) {
+      throw new Error("Supabase is not configured in production");
+    }
     const rows = readMockRows().filter(r => r.collection === collectionName(key));
     metric(key, rows.length);
     return rows.map(record);
@@ -238,19 +258,27 @@
   async function getPage(key, options = {}) {
     await ready();
     const collection = collectionName(key), pageSize = Math.min(Math.max(Number(options.pageSize) || 30, 1), 100);
-    try {
+    const c = config();
+    if (c) {
       let q = client.from("data_records").select("id,payload,date_text,month_text,updated_at").eq("collection", collection);
       q = applyWhere(q, options.where);
       const order = options.orderField === "month" ? "month_text" : options.orderField === "updatedAt" ? "updated_at" : "date_text";
       q = q.order(order, { ascending: false, nullsFirst: false }).order("id", { ascending: false }).limit(pageSize);
       if (options.cursor?.primaryValue) q = q.lt(order, String(options.cursor.primaryValue));
       const { data, error } = await q;
-      if (!error && Array.isArray(data)) {
+      if (error) {
+        console.error("Supabase getPage error for " + collection + ":", error);
+        throw Object.assign(new Error(error.message || "Supabase getPage failed"), { code: error.code, table: collection });
+      }
+      if (Array.isArray(data)) {
         metric(key, data.length);
         const records = data.map(record), last = data[data.length - 1];
         return { records, pageSize, hasMore: data.length === pageSize, nextCursor: last ? { primaryValue: last[order], documentId: last.id } : null };
       }
-    } catch (_e) {}
+    }
+    if (window.MITALI_IS_PROD) {
+      throw new Error("Supabase is not configured in production");
+    }
     let rows = readMockRows().filter(r => r.collection === collection);
     for (const f of (Array.isArray(options.where) ? options.where : options.where ? [options.where] : [])) {
       if (!f?.field || f.value === undefined) continue;
@@ -271,6 +299,18 @@
     await ready();
     const rows = records.filter(r => r?.id).map(r => rowFromRecord(collectionName(key), r));
     if (!rows.length) return;
+    const c = config();
+    if (c) {
+      const { error } = await client.from("data_records").upsert(rows, { onConflict: "collection,id" });
+      if (error) {
+        console.error("Supabase upsertRecords error for " + collectionName(key) + ":", error);
+        throw Object.assign(new Error(error.message || "Supabase upsert failed"), { code: error.code, details: error.details, table: collectionName(key) });
+      }
+      return;
+    }
+    if (window.MITALI_IS_PROD) {
+      throw new Error("Supabase is not configured in production");
+    }
     const all = readMockRows();
     rows.forEach(item => {
       const idx = all.findIndex(r => r.collection === item.collection && String(r.id) === String(item.id));
@@ -278,15 +318,26 @@
       else all.push({ ...item });
     });
     writeMockRows(all);
-    try { await client.from("data_records").upsert(rows, { onConflict: "collection,id" }); } catch (_e) {}
   }
   async function upsertRecord(key, recordValue) { await upsertRecords(key, [recordValue]); return recordValue; }
   async function deleteRecords(key, ids) {
     await ready();
     const idSet = new Set((ids || []).map(String));
+    if (!idSet.size) return;
+    const c = config();
+    if (c) {
+      const { error } = await client.from("data_records").delete().eq("collection", collectionName(key)).in("id", [...idSet]);
+      if (error) {
+        console.error("Supabase deleteRecords error for " + collectionName(key) + ":", error);
+        throw Object.assign(new Error(error.message || "Supabase delete failed"), { code: error.code, details: error.details, table: collectionName(key) });
+      }
+      return;
+    }
+    if (window.MITALI_IS_PROD) {
+      throw new Error("Supabase is not configured in production");
+    }
     const all = readMockRows().filter(r => !(r.collection === collectionName(key) && idSet.has(String(r.id))));
     writeMockRows(all);
-    try { await client.from("data_records").delete().eq("collection", collectionName(key)).in("id", [...idSet]); } catch (_e) {}
   }
   async function setValue(key, value) { return upsertRecord(key, { id: "app", ...(Array.isArray(value) && key === "specialties" ? { value } : value || {}) }); }
   async function setTable(key, records) { await ready(); const collection = collectionName(key), keep = records.map(r => String(r.id)); try { let q = client.from("data_records").delete().eq("collection", collection); if (keep.length) q = q.not("id", "in", `(${keep.join(",")})`); await q; } catch (_e) {} await upsertRecords(key, records); return records; }
@@ -353,6 +404,8 @@
   const configureManagerRecovery = payload => adminRequest({ action: "configureManagerRecovery", ...payload });
   const recoverManagerPassword = payload => fetchJson("/api/admin/account", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "recoverManagerPassword", ...payload }) });
   const adminWipeBusinessData = confirmationText => adminRequest({ action: "wipeBusinessData", confirmationText });
+  const adminAccountRequest = adminRequest;
+  const isMockMode = () => !config();
   window.getPatientIndexPage = getPatientIndexPage; window.searchPatientIndex = searchPatientIndex; window.savePatientToIndex = savePatientToIndex;
-  window.MitaliSupabase = window.MitaliFirebase = Object.freeze({ config: Object.freeze({ provider: "supabase" }), collections: COLLECTIONS, init, ready, waitForAuth, getTable, getPage, getPatientIndexPage, searchPatientIndex, savePatientToIndex, setTable, getValue, setValue, upsertRecord, upsertRecords, deleteRecords, subscribe, subscribePage, authEmailForUsername, signInWithUsername, changePassword, getFinancialSummary, getReportsData, getDoctorMonthReport, getMonthRecords, adminCreateAccount, configureManagerRecovery, recoverManagerPassword, adminUpdateAccount, adminListAccounts, adminDeleteAccount, adminWipeBusinessData, signOut, authUser: currentUser, getUserProfile, ensureAdminProfile, updateOwnSecurityMetadata, getReadMetrics: () => JSON.parse(JSON.stringify(READ_METRICS)), resetReadMetrics: () => { READ_METRICS.queries = 0; READ_METRICS.documents = 0; READ_METRICS.byKey = {}; READ_METRICS.lastReadAt = null; } });
+  window.MitaliSupabase = window.MitaliFirebase = Object.freeze({ config: Object.freeze({ provider: "supabase" }), collections: COLLECTIONS, init, ready, waitForAuth, isMockMode, getTable, getPage, getPatientIndexPage, searchPatientIndex, savePatientToIndex, setTable, getValue, setValue, upsertRecord, upsertRecords, deleteRecords, subscribe, subscribePage, authEmailForUsername, signInWithUsername, changePassword, getFinancialSummary, getReportsData, getDoctorMonthReport, getMonthRecords, adminCreateAccount, configureManagerRecovery, recoverManagerPassword, adminUpdateAccount, adminListAccounts, adminDeleteAccount, adminAccountRequest, adminWipeBusinessData, signOut, authUser: currentUser, getUserProfile, ensureAdminProfile, updateOwnSecurityMetadata, getReadMetrics: () => JSON.parse(JSON.stringify(READ_METRICS)), resetReadMetrics: () => { READ_METRICS.queries = 0; READ_METRICS.documents = 0; READ_METRICS.byKey = {}; READ_METRICS.lastReadAt = null; } });
 })();
