@@ -118,8 +118,17 @@ async function run() {
 
   // 2. Process Business Collections
   for (const [key, targetCollection] of Object.entries(COLLECTIONS_MAP)) {
-    const records = sourceData[key];
-    if (!Array.isArray(records)) continue;
+    const rawVal = sourceData[key];
+    if (!rawVal) continue;
+    let records = [];
+    if (Array.isArray(rawVal)) {
+      records = rawVal;
+    } else if (typeof rawVal === 'object' && rawVal !== null) {
+      records = Object.entries(rawVal).map(([docId, docVal]) => ({ id: (docVal && docVal.id) || docId, ...(docVal || {}) }));
+    } else {
+      continue;
+    }
+    if (!records.length) continue;
     report.totalCollections++;
     report.collections[targetCollection] = { source: records.length, valid: 0, duplicates: 0, rejected: 0 };
     report.overallRecords.source += records.length;
@@ -172,7 +181,10 @@ async function run() {
   }
 
   // 3. Process Users and Accounts
-  const usersList = sourceData.staffAccounts || sourceData.users;
+  let usersList = sourceData.staffAccounts || sourceData.users || sourceData.staff_accounts;
+  if (usersList && typeof usersList === 'object' && !Array.isArray(usersList)) {
+    usersList = Object.entries(usersList).map(([id, u]) => ({ id: (u && u.id) || id, ...(u || {}) }));
+  }
   if (Array.isArray(usersList)) {
     report.users.found = usersList.length;
     for (const u of usersList) {

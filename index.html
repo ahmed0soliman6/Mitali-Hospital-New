@@ -6950,14 +6950,14 @@ function renderSettings() {
       </div>
     </div>
     <div class="card" style="margin-bottom:18px;">
-      <div class="section-title">💾 النسخ الاحتياطي</div>
+      <div class="section-title">💾 النسخ الاحتياطي ونقل البيانات</div>
       <p style="font-size:12.5px; color:var(--muted); margin-bottom:10px;">
-        نسخة احتياطية كاملة لكل بيانات النظام (الزيارات، الخزينة، الأطباء، المستخدمين...) كملف واحد تحفظه بنفسك — حماية إضافية بجانب Firestore.
+        نسخة احتياطية كاملة لكل بيانات النظام (الزيارات، الخزينة، الأطباء، المستخدمين...) كملف JSON تحفظه بنفسك — حماية إضافية للبيانات.
       </p>
       <button class="btn" id="downloadBackupBtn">⬇️ تنزيل نسخة احتياطية</button>
       <div style="margin-top:16px; padding-top:14px; border-top:1px solid var(--border,#eee);">
-        <div style="font-weight:700; font-size:13px; margin-bottom:6px; color:var(--expense);">استعادة من نسخة احتياطية</div>
-        <p style="font-size:12px; color:var(--muted); margin-bottom:8px;">⚠️ سيستبدل هذا كل البيانات الحالية بمحتوى الملف المرفوع. للمدير فقط.</p>
+        <div style="font-weight:700; font-size:13px; margin-bottom:6px; color:var(--expense);">استعادة النسخة الاحتياطية أو نقل البيانات من Firebase</div>
+        <p style="font-size:12px; color:var(--muted); margin-bottom:8px;">📁 يمكنك رفع ملف JSON مستخرج من Firebase أو نسخة احتياطية سابقة ليتم استيرادها وحفظها مباشرة في قاعدة بيانات Supabase السحابية. (للمدير فقط)</p>
         <input type="file" id="restoreBackupInput" accept="application/json,.json" ${isAdminUser() ? "" : "disabled"}>
       </div>
     </div>` : ""}
@@ -7279,7 +7279,28 @@ function renderSettings() {
       let parsed;
       try { parsed = JSON.parse(reader.result); }
       catch (e) { showToast("⚠️ الملف غير صالح — تأكد أنه ملف نسخة احتياطية صحيح"); restoreBackupInput.value = ""; return; }
-      const data = parsed && parsed.data ? parsed.data : parsed; // دعم الملف بصيغته أو مباشرة ككائن بيانات
+      const rawSource = parsed && parsed.data ? parsed.data : parsed; // دعم الملف بصيغته أو مباشرة ككائن بيانات
+      const ALIASES = {
+        visits_clinic: "visitsClinic",
+        visits_dental: "visitsDental",
+        visits_operations: "visitsOperations",
+        visits_labs: "visitsLabs",
+        visits_radiology: "visitsRadiology",
+        lab_expenses: "labExpenses",
+        audit_log: "auditLog",
+        staff_accounts: "staffAccounts",
+        users: "staffAccounts",
+        system_control: "systemControl"
+      };
+      const data = {};
+      Object.entries(rawSource || {}).forEach(([k, v]) => {
+        const canonicalKey = ALIASES[k] || k;
+        if (v && typeof v === "object" && !Array.isArray(v) && canonicalKey !== "settings") {
+          data[canonicalKey] = Object.entries(v).map(([id, doc]) => ({ id: (doc && doc.id) || id, ...(doc || {}) }));
+        } else {
+          data[canonicalKey] = v;
+        }
+      });
       const foundKeys = BACKUP_KEYS.filter(k => data && Object.prototype.hasOwnProperty.call(data, k));
       if (!foundKeys.length) { showToast("⚠️ لم يتم التعرف على هذا الملف كنسخة احتياطية للنظام"); restoreBackupInput.value = ""; return; }
       const when = parsed?.exportedAt ? new Date(parsed.exportedAt).toLocaleString("ar-EG") : "غير معروف";

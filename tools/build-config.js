@@ -20,6 +20,12 @@ if (isProd) {
     console.error('تأكد من إضافتها في لوحة تحكم Vercel (Environment Variables).');
     process.exit(1);
   }
+  if (anonKey.length < 50 || anonKey.split('.').length !== 3) {
+    console.error('❌ خطأ فادح في البناء (Build Error):');
+    console.error('مفتاح SUPABASE_ANON_KEY يبدو مقطوعاً أو غير مكتمل (JWT غير صالح).');
+    console.error('تأكد من نسخ المفتاح كاملاً من لوحة Supabase (يتكون من 3 أجزاء تفصلها نقاط . وطوله أكثر من 150 حرفاً).');
+    process.exit(1);
+  }
 }
 
 const configContent = `/* Generated configuration for Mitali Hospital */
