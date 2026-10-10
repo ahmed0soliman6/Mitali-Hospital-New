@@ -204,7 +204,7 @@
       const email = authEmailForUsername(username);
       const { data, error } = await init().auth.signInWithPassword({ email, password });
       if (error) {
-        console.error("Supabase Auth signInWithPassword error:", error.message || error);
+        console.warn("Supabase Auth signInWithPassword:", error.message || error);
         throw Object.assign(new Error(error.message || "اسم المستخدم أو كلمة المرور غير صحيحة"), {
           code: error.code || "auth/invalid-credential"
         });
