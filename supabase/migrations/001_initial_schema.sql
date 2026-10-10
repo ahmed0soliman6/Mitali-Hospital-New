@@ -68,12 +68,37 @@ language sql immutable as $$
 $$;
 
 
+create or replace function public.sync_data_records_fields() returns trigger language plpgsql as $$
+begin
+  if new.date_text is null or new.date_text = '' then
+    new.date_text = coalesce(nullif(new.payload->>'date', ''), nullif(new.payload->>'lastVisitDate', ''));
+  end if;
+  if new.month_text is null or new.month_text = '' then
+    new.month_text = coalesce(nullif(new.payload->>'month', ''), substring(new.payload->>'date' from 1 for 7), substring(new.payload->>'lastVisitDate' from 1 for 7));
+  end if;
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
 create or replace function public.has_permission(p_collection text, p_action text) returns boolean
 language sql stable security definer set search_path = public as $$
-  select public.is_manager() or exists(
-    select 1 from public.profiles p
-    where p.id = auth.uid() and p.status <> 'موقوف'
-      and coalesce((p.permissions -> public.permission_module(p_collection) ->> p_action)::boolean, false)
+  select public.is_manager() or (
+    public.is_active_user() and (
+      (p_action = 'view' and p_collection in ('doctors', 'employees', 'settings', 'categories', 'specialties', 'services', 'pricing'))
+      or
+      coalesce((select (p.permissions -> public.permission_module(p_collection) ->> p_action)::boolean from public.profiles p where p.id = auth.uid() and p.status <> 'موقوف'), false)
+      or
+      (p_collection = 'patient_file_index_clinic' and (
+        (p_action = 'view' and (coalesce((select (p.permissions -> 'clinic' ->> 'view')::boolean from public.profiles p where p.id = auth.uid() and p.status <> 'موقوف'), false) or coalesce((select (p.permissions -> 'patientFilesClinic' ->> 'view')::boolean from public.profiles p where p.id = auth.uid() and p.status <> 'موقوف'), false))) or
+        (p_action in ('add', 'edit') and (coalesce((select (p.permissions -> 'clinic' ->> 'add')::boolean from public.profiles p where p.id = auth.uid() and p.status <> 'موقوف'), false) or coalesce((select (p.permissions -> 'clinic' ->> 'edit')::boolean from public.profiles p where p.id = auth.uid() and p.status <> 'موقوف'), false) or coalesce((select (p.permissions -> 'patientFilesClinic' ->> 'add')::boolean from public.profiles p where p.id = auth.uid() and p.status <> 'موقوف'), false) or coalesce((select (p.permissions -> 'patientFilesClinic' ->> 'edit')::boolean from public.profiles p where p.id = auth.uid() and p.status <> 'موقوف'), false)))
+      ))
+      or
+      (p_collection = 'patient_file_index_dental' and (
+        (p_action = 'view' and (coalesce((select (p.permissions -> 'dental' ->> 'view')::boolean from public.profiles p where p.id = auth.uid() and p.status <> 'موقوف'), false) or coalesce((select (p.permissions -> 'patientFilesDental' ->> 'view')::boolean from public.profiles p where p.id = auth.uid() and p.status <> 'موقوف'), false))) or
+        (p_action in ('add', 'edit') and (coalesce((select (p.permissions -> 'dental' ->> 'add')::boolean from public.profiles p where p.id = auth.uid() and p.status <> 'موقوف'), false) or coalesce((select (p.permissions -> 'dental' ->> 'edit')::boolean from public.profiles p where p.id = auth.uid() and p.status <> 'موقوف'), false) or coalesce((select (p.permissions -> 'patientFilesDental' ->> 'add')::boolean from public.profiles p where p.id = auth.uid() and p.status <> 'موقوف'), false) or coalesce((select (p.permissions -> 'patientFilesDental' ->> 'edit')::boolean from public.profiles p where p.id = auth.uid() and p.status <> 'موقوف'), false)))
+      ))
+    )
   );
 $$;
 alter table public.data_records enable row level security;

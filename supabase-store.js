@@ -174,7 +174,7 @@
   function collectionName(key) { const name = COLLECTIONS[key] || (TABLES.has(key) ? key : null) || (key ? String(key).replace(/([A-Z])/g, "_$1").toLowerCase() : null) || key; return name; }
   function clean(value) { if (Array.isArray(value)) return value.map(clean); if (!value || typeof value !== "object") return value; return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined).map(([k, v]) => [k, clean(v)])); }
   function safeRecord(record) { const out = clean({ ...(record || {}) }); delete out.password; delete out.passwordHash; return out; }
-  function rowFromRecord(collection, record) { const payload = safeRecord(record); const date = String(payload.date || ""), month = String(payload.month || (date.match(/^\d{4}-\d{2}/) || [""])[0] || ""); return { collection, id: String(payload.id), payload, date_text: date || null, month_text: month || null, updated_at: String(payload.updatedAt || payload.createdAt || new Date().toISOString()) }; }
+  function rowFromRecord(collection, record) { const payload = safeRecord(record); const date = String(payload.date || payload.lastVisitDate || ""), month = String(payload.month || (date.match(/^\d{4}-\d{2}/) || [""])[0] || ""); return { collection, id: String(payload.id), payload, date_text: date || null, month_text: month || null, updated_at: String(payload.updatedAt || payload.createdAt || new Date().toISOString()) }; }
   function record(row) { return { id: row.id, ...(row.payload || {}) }; }
   function metric(key, count) { READ_METRICS.queries++; READ_METRICS.documents += Number(count || 0); READ_METRICS.byKey[key] = (READ_METRICS.byKey[key] || 0) + Number(count || 0); READ_METRICS.lastReadAt = new Date().toISOString(); }
   function apiUrl(path) { return API_BASE + path; }

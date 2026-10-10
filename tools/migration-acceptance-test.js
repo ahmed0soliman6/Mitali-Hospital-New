@@ -238,6 +238,7 @@ async function runTests() {
     }], { onConflict: 'collection,id' });
     const { count } = await adminClient.from('data_records').select('*', { count: 'exact', head: true }).eq('collection', 'visits_clinic').eq('id', offlineItem.id);
     assert(17, 'عدم تكرار السجل بعد إعادة المحاولة (Idempotent upsert, count=1)', !retryErr && count === 1);
+    await adminClient.from('data_records').delete().eq('collection', 'visits_clinic').eq('id', offlineItem.id);
   } catch (e) {
     assert(16, 'رفع العملية بعد عودة الإنترنت', false, e.message);
     assert(17, 'عدم تكرار السجل', false, e.message);
@@ -302,6 +303,9 @@ async function runTests() {
       if (!data) allFound = false;
     }
     assert(23, 'ظهور كل قسم في data_records (Verify all 5 in data_records)', allFound);
+    for (const d of depts) {
+      await adminClient.from('data_records').delete().eq('collection', d.col).eq('id', `dept-test-${d.col}`);
+    }
   } catch (e) {
     assert(22, 'تسجيل في الأقسام الخمسة', false, e.message);
     assert(23, 'ظهور الأقسام الخمسة في data_records', false, e.message);

@@ -47,8 +47,9 @@
     "test": "npm run check && npm run test:acceptance && npm run test:income-form && npm run test:doctor-payroll && npm run test:accounting-consistency && npm run test:doctor-departments && npm run test:visit-window-size"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.57.0",
     "express": "^4.21.2",
-    "@supabase/supabase-js": "^2.57.0"
+    "pg": "^8.23.1"
   },
   "devDependencies": {},
   "build": {

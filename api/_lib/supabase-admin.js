@@ -349,6 +349,8 @@ function cleanPermissions(value) {
     p.patientFilesDental = { ...(p.patientFilesDental || {}), view: true };
   }
   p.doctors = { ...(p.doctors || {}), view: true };
+  p.employees = { ...(p.employees || {}), view: true };
+  p.services = { ...(p.services || {}), view: true };
   p.categories = { ...(p.categories || {}), view: true };
   p.specialties = { ...(p.specialties || {}), view: true };
   p.settings = { ...(p.settings || {}), view: true };

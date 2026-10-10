@@ -2167,6 +2167,9 @@ function exactVisitsPlan(page) {
     if (!/^\d{4}-\d{2}$/.test(ym) || !can("doctors", "view")) return null;
     return { keys: VISIT_SOURCE_DEFINITIONS.map(def => def.dbKey), scope: ym };
   }
+  if (id === "outstandingBalances" || id === "outstandingBalancesMenu") {
+    return { keys: VISIT_SOURCE_DEFINITIONS.map(def => def.dbKey), scope: "all" };
+  }
   const match = /^outstandingBalances(Clinic|Dental|Operations|Labs|Radiology)$/.exec(String(id));
   if (!match) return null;
   const source = VISIT_SOURCE_DEFINITIONS.find(def => def.kindKey === match[1].toLowerCase());
@@ -5158,7 +5161,15 @@ function renderPatientFilesPage(kind) {
       }
     }
     if (!selectedPatient) {
-      selectedPatient = { id: selectedKey, name: selectedKey, phone: "", fileNo: "" };
+      const matchFile = /^F:(.+)$/.exec(selectedKey);
+      const matchName = /^N:([^|]*)\|(.*)$/.exec(selectedKey);
+      if (matchFile) {
+        selectedPatient = { id: selectedKey, name: "", phone: "", fileNo: matchFile[1] };
+      } else if (matchName) {
+        selectedPatient = { id: selectedKey, name: matchName[1], phone: matchName[2], fileNo: "" };
+      } else {
+        selectedPatient = { id: selectedKey, name: selectedKey, phone: "", fileNo: "" };
+      }
     }
   }
 
@@ -5250,23 +5261,42 @@ function renderPatientFilesPage(kind) {
       if (!amount || amount <= 0) { showToast("⚠️ ادخل مبلغًا صحيحًا أكبر من صفر"); return; }
       if (amount > remaining + 0.009) amount = remaining;
       const oldRec = { ...rec };
-      rec.total = (Number(rec.total) || 0) - amount;
+      rec.paid = (Number(rec.paid) || 0) + amount;
       rec.status = visitRemaining(rec) <= 0.009 ? "تم" : "جزئي";
       logActivity(kindKey === "dental" ? "تحصيل دفعة أسنان" : "تحصيل دفعة عيادات", kindKey, oldRec, rec);
-      const collectionVisit = {
-        id: uid(), date: todayISO(), fileNo: rec.fileNo || "", patient: rec.patient, phone: rec.phone,
-        doctorId: rec.doctorId, examType: "متابعة", total: amount, paid: amount, status: "تم",
-        notes: `تحصيل دفعة من مستحق زيارة ${rec.date || ""}`, nextVisitDate: null, createdAt: nowISO(),
+
+      // تسجيل سند إيراد تحصيل في الوارد اليومي
+      const incomeEntry = {
+        id: uid(),
+        receiptNo: "REC-" + Date.now().toString().slice(-6),
+        date: todayISO(),
+        party: rec.patient || patientCard.name || "",
+        phone: rec.phone || "",
+        fileNo: rec.fileNo || "",
+        category: kindKey === "dental" ? "عيادة الأسنان" : "عيادات خارجية",
+        amount: amount,
+        desc: `تحصيل دفعة من مستحق زيارة ${rec.date || ""}`,
+        paymentMethod: rec.paymentMethod || "نقدي",
+        receiver: currentUser?.displayName || currentUser?.username || "الموظف",
+        doctorId: rec.doctorId || null,
+        linkedVisitId: rec.id,
+        createdAt: nowISO()
       };
-      list.push(collectionVisit);
-      await syncVisitIncomeLink(collectionVisit, kindKey);
+      if (!Array.isArray(DB.income)) DB.income = [];
+      DB.income.push(incomeEntry);
+
+      if (window.MitaliSupabase && typeof window.MitaliSupabase.savePatientToIndex === "function") {
+        try { await window.MitaliSupabase.savePatientToIndex(rec, kindKey === "dental"); } catch (_e) {}
+      }
+
       try {
         await persist(kindKey === "dental" ? "visitsDental" : "visitsClinic");
+        await persist("income");
       } catch (err) {
         console.error("Collect payment sync push failed:", err);
       }
       delete PATIENT_FILE_VISITS_CACHE[pageKey][selectedKey];
-      saveToast(`تم تحصيل ${fmt(amount)} ج.م بنجاح — وسُجِّلت زيارة متابعة بتاريخ اليوم`);
+      saveToast(`تم تحصيل ${fmt(amount)} ج.م بنجاح وسُجِّل السند في الوارد اليومي`);
       renderPatientFilesPage(kind);
     }));
 
@@ -5292,32 +5322,45 @@ function renderPatientFilesPage(kind) {
         const remaining = visitRemaining(rec);
         const applyNow = Math.min(remaining, remainingToApply);
         const oldRec = { ...rec };
-        rec.total = (Number(rec.total) || 0) - applyNow;
+        rec.paid = (Number(rec.paid) || 0) + applyNow;
         rec.status = visitRemaining(rec) <= 0.009 ? "تم" : "جزئي";
         logActivity(kindKey === "dental" ? "تحصيل دفعة أسنان" : "تحصيل دفعة عيادات", kindKey, oldRec, rec);
         touchedTables.add(kindKey === "dental" ? "visitsDental" : "visitsClinic");
+        if (window.MitaliSupabase && typeof window.MitaliSupabase.savePatientToIndex === "function") {
+          try { await window.MitaliSupabase.savePatientToIndex(rec, kindKey === "dental"); } catch (_e) {}
+        }
         if (firstTouchedDoctorId === null) { firstTouchedDoctorId = rec.doctorId; firstTouchedDate = rec.date; firstTouchedKindKey = kindKey; }
         remainingToApply -= applyNow;
         if (rec.status === "تم") visitsSettled++;
       }
-      if (firstTouchedKindKey) {
-        const collectionList = firstTouchedKindKey === "dental" ? DB.visitsDental : DB.visitsClinic;
-        const collectionVisit = {
-          id: uid(), date: todayISO(), fileNo: patientCard.fileNos[0] || "", patient: patientCard.name, phone: patientCard.phone,
-          doctorId: firstTouchedDoctorId, examType: "متابعة", total: amount, paid: amount, status: "تم",
-          notes: `تحصيل دفعة من مستحقات قديمة (بدءًا من زيارة ${firstTouchedDate || ""})`, nextVisitDate: null, createdAt: nowISO(),
-        };
-        collectionList.push(collectionVisit);
-        await syncVisitIncomeLink(collectionVisit, firstTouchedKindKey);
-        touchedTables.add(firstTouchedKindKey === "dental" ? "visitsDental" : "visitsClinic");
-      }
+
+      // تسجيل سند إيراد تحصيل في الوارد اليومي
+      const incomeEntry = {
+        id: uid(),
+        receiptNo: "REC-" + Date.now().toString().slice(-6),
+        date: todayISO(),
+        party: patientCard.name || "",
+        phone: patientCard.phone || "",
+        fileNo: patientCard.fileNos[0] || "",
+        category: firstTouchedKindKey === "dental" ? "عيادة الأسنان" : "عيادات خارجية",
+        amount: amount,
+        desc: `تحصيل دفعة من مستحقات قديمة (بدءًا من زيارة ${firstTouchedDate || ""})`,
+        paymentMethod: "نقدي",
+        receiver: currentUser?.displayName || currentUser?.username || "الموظف",
+        doctorId: firstTouchedDoctorId || null,
+        createdAt: nowISO()
+      };
+      if (!Array.isArray(DB.income)) DB.income = [];
+      DB.income.push(incomeEntry);
+      touchedTables.add("income");
+
       try {
         for (const table of touchedTables) await persist(table);
       } catch (err) {
         console.error("Collect total payment sync failed:", err);
       }
       delete PATIENT_FILE_VISITS_CACHE[pageKey][selectedKey];
-      saveToast(`تم تحصيل ${fmt(amount)} ج.م بنجاح${visitsSettled ? ` — تم سداد ${visitsSettled} زيارة بالكامل` : ""} — وسُجِّلت زيارة متابعة`);
+      saveToast(`تم تحصيل ${fmt(amount)} ج.م بنجاح${visitsSettled ? ` — تم سداد ${visitsSettled} زيارة بالكامل` : ""} وسُجِّل السند في الوارد اليومي`);
       renderPatientFilesPage(kind);
     }));
 
