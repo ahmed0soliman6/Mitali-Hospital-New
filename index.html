@@ -2663,7 +2663,11 @@ function percentShareForExam(doctor, examType) {
   };
 }
 function computeShare(visit) {
-  const d = dInfo(visit.doctorId);
+  let d = dInfo(visit?.doctorId);
+  if (!d && visit) {
+    const fallbackName = String(visit.doctorName || visit.doctor || "").trim();
+    if (fallbackName) d = dInfo(fallbackName);
+  }
   if (!d) return { doc: 0, clinic: 0 };
   const paid = Number(visit.paid) || 0;
   const mode = doctorTypeUsesPercent(d.type) ? "percent" : (d.feeMode || "fixed_visit");
@@ -3610,20 +3614,36 @@ async function backgroundRefreshCurrentPage() {
 setInterval(backgroundRefreshCurrentPage, 300000);
 
 const BACKUP_EXPORT_KEYS = ["doctors","employees","visitsClinic","visitsDental","visitsOperations","visitsLabs","visitsRadiology","income","expense","payroll","settings","staffAccounts","categories","specialties","auditLog","labExpenses"];
-function downloadSystemBackup() {
-  const backup = { app: "مستشفى لجنة زكاة ميت على التخصصي", exportedAt: nowISO(), data: {} };
-  BACKUP_EXPORT_KEYS.forEach(key => { backup.data[key] = DB[key]; });
-  const json = JSON.stringify(backup, null, 2);
-  const blob = new Blob([json], { type: "application/json;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url; a.download = `نسخة_احتياطية_مستشفى_ميت_على_${todayISO()}.json`;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  logActivity("تنزيل نسخة احتياطية", "settings");
-  try { localStorage.setItem("lastBackupAt", nowISO()); } catch (e) { /* ignore */ }
-  showToast("تم تنزيل النسخة الاحتياطية بنجاح");
-  renderTopAlerts();
+async function downloadSystemBackup() {
+  showToast("⏳ جارٍ تجهيز النسخة الاحتياطية الكاملة من السحابة...");
+  try {
+    const backup = { app: "مستشفى لجنة زكاة ميت على التخصصي", exportedAt: nowISO(), data: {} };
+    for (const key of BACKUP_EXPORT_KEYS) {
+      if (STORAGE_MODE === "supabase" && window.MitaliSupabase && window.MitaliSupabase.getTable) {
+        try {
+          const fresh = await window.MitaliSupabase.getTable(key);
+          if (Array.isArray(fresh) || (fresh && typeof fresh === "object")) {
+            DB[key] = fresh;
+          }
+        } catch (_e) {}
+      }
+      backup.data[key] = DB[key] || (["settings", "categories"].includes(key) ? {} : []);
+    }
+    const json = JSON.stringify(backup, null, 2);
+    const blob = new Blob([json], { type: "application/json;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `نسخة_احتياطية_مستشفى_ميت_على_${todayISO()}.json`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    logActivity("تنزيل نسخة احتياطية", "settings");
+    try { localStorage.setItem("lastBackupAt", nowISO()); } catch (e) { /* ignore */ }
+    showToast("تم تنزيل النسخة الاحتياطية بنجاح");
+    renderTopAlerts();
+  } catch (err) {
+    console.error("Backup download error:", err);
+    showToast("⚠️ حدث خطأ أثناء تنزيل النسخة الاحتياطية");
+  }
 }
 function topAlertData() {
   const today = todayISO();

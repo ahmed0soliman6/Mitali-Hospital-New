@@ -31,6 +31,7 @@ END;
 $$;
 
 -- 2. Non-mutating trigger function: NEVER alters or inflates NEW.payload
+-- Only extracts explicit columns if NULL, and updates updated_at timestamp.
 CREATE OR REPLACE FUNCTION public.sync_explicit_table_timestamp()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
@@ -43,6 +44,7 @@ CREATE OR REPLACE FUNCTION public.sync_visit_table_columns()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
   NEW.updated_at = NOW();
+  -- Fill explicit columns from payload ONLY if explicit column is empty
   IF NEW.patient IS NULL OR NEW.patient = '' THEN
     NEW.patient = COALESCE(NULLIF(NEW.payload->>'patient', ''), NULLIF(NEW.payload->>'name', ''));
   END IF;
@@ -82,6 +84,7 @@ BEGIN
   IF NEW.linked_income_id IS NULL OR NEW.linked_income_id = '' THEN
     NEW.linked_income_id = NULLIF(NEW.payload->>'linkedIncomeId', '');
   END IF;
+  -- IMPORTANT: Never modify NEW.payload in trigger to prevent bloat & pollution!
   RETURN NEW;
 END;
 $$;

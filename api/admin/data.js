@@ -13,7 +13,6 @@ const COLLECTIONS = [
   'patient_file_index',
   'patient_files_clinic',
   'patient_files_dental',
-  'outbox',
   'audit_log'
 ];
 
@@ -29,25 +28,13 @@ module.exports = async function handler(req, res) {
     const deleted = {};
     let totalDeleted = 0;
     for (const collection of COLLECTIONS) {
-      try {
-        let count = 0;
-        const { data, error } = await admin.from(collection).delete().neq('id', '___non_existent___').select('id');
-        if (!error && Array.isArray(data)) {
-          count = data.length;
-        } else {
-          try {
-            const legRes = await admin.from('data_records').delete().eq('collection', collection).select('id');
-            if (!legRes.error && Array.isArray(legRes.data)) count = legRes.data.length;
-          } catch (_e) {}
-        }
-        deleted[collection] = count;
-        totalDeleted += count;
-        try {
-          await admin.from('data_records').delete().eq('collection', collection);
-        } catch (_e) {}
-      } catch (_e) {
-        deleted[collection] = 0;
+      const { data, error } = await admin.from(collection).delete().neq('id', '___non_existent___').select('id');
+      if (error) {
+        throw Object.assign(new Error(`Failed to wipe table ${collection}: ${error.message || error}`), { status: 500, code: error.code || 'database-error' });
       }
+      const count = Array.isArray(data) ? data.length : 0;
+      deleted[collection] = count;
+      totalDeleted += count;
     }
     const wipeId = `wipe_${Date.now()}`;
     return res.status(200).json({

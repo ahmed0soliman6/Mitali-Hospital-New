@@ -178,51 +178,186 @@
   function explicitRowFromRecord(collection, record) {
     const payload = safeRecord(record);
     const date = String(payload.date || payload.lastVisitDate || ""), month = String(payload.month || (date.match(/^\d{4}-\d{2}/) || [""])[0] || "");
+    const updated_at = String(payload.updatedAt || payload.createdAt || new Date().toISOString());
+
+    if (collection.startsWith("visits_")) {
+      return {
+        id: String(payload.id),
+        date: date || null,
+        month: month || null,
+        file_no: payload.fileNo || null,
+        patient: payload.patient || payload.name || null,
+        phone: payload.phone || null,
+        doctor_id: payload.doctorId || payload.docId || null,
+        doctor_name: payload.doctorName || null,
+        exam_type: payload.examType || payload.type || null,
+        services: Array.isArray(payload.services) ? payload.services : [],
+        total: Number(payload.total || payload.amount || 0),
+        paid: Number(payload.paid || payload.paidAmount || 0),
+        payment_method: payload.paymentMethod || null,
+        status: payload.status || null,
+        notes: payload.notes || null,
+        linked_income_id: payload.linkedIncomeId || null,
+        next_visit_date: payload.nextVisitDate || null,
+        payload,
+        updated_at
+      };
+    }
+
+    if (collection === "income" || collection === "expense" || collection === "lab_expenses") {
+      return {
+        id: String(payload.id),
+        date: date || null,
+        month: month || null,
+        party: payload.party || null,
+        category: payload.category || null,
+        description: payload.description || payload.desc || null,
+        amount: Number(payload.amount || payload.total || 0),
+        payment_method: payload.paymentMethod || null,
+        receipt_no: payload.receiptNo || payload.voucherNo || null,
+        notes: payload.notes || null,
+        linked_visit_id: payload.linkedVisitId || null,
+        payload,
+        updated_at
+      };
+    }
+
+    if (collection === "payroll") {
+      return {
+        id: String(payload.id),
+        month: month || null,
+        date: date || null,
+        employee_id: payload.employeeId || null,
+        employee_name: payload.employeeName || null,
+        role: payload.role || null,
+        amount: Number(payload.amount || payload.netSalary || payload.salary || 0),
+        salary: Number(payload.salary || payload.baseSalary || 0),
+        bonus: Number(payload.bonus || 0),
+        deductions: Number(payload.deductions || 0),
+        net_salary: Number(payload.netSalary || payload.amount || 0),
+        status: payload.status || null,
+        payment_method: payload.paymentMethod || null,
+        notes: payload.notes || null,
+        payload,
+        updated_at
+      };
+    }
+
+    if (collection === "doctors") {
+      return {
+        id: String(payload.id),
+        name: payload.name || null,
+        specialty: payload.specialty || null,
+        phone: payload.phone || null,
+        fee_mode: payload.feeMode || null,
+        clinic_pct: payload.clinicPct != null ? Number(payload.clinicPct) : null,
+        doc_pct: payload.docPct != null ? Number(payload.docPct) : null,
+        checkup_clinic_fee: payload.checkupClinicFee != null ? Number(payload.checkupClinicFee) : null,
+        status: payload.status || null,
+        payload,
+        updated_at
+      };
+    }
+
+    if (collection === "employees") {
+      return {
+        id: String(payload.id),
+        name: payload.name || null,
+        role: payload.role || null,
+        phone: payload.phone || null,
+        base_salary: payload.baseSalary != null ? Number(payload.baseSalary) : null,
+        status: payload.status || null,
+        payload,
+        updated_at
+      };
+    }
+
+    if (collection.startsWith("patient_file_index_")) {
+      return {
+        id: String(payload.id),
+        name: payload.name || null,
+        phone: payload.phone || null,
+        file_no: payload.fileNo || null,
+        patient_key: payload.patientKey || null,
+        last_visit_date: payload.lastVisitDate || null,
+        visits_count: payload.visitsCount != null ? Number(payload.visitsCount) : null,
+        total_paid: payload.totalPaid != null ? Number(payload.totalPaid) : null,
+        total_due: payload.totalDue != null ? Number(payload.totalDue) : null,
+        payload,
+        updated_at
+      };
+    }
+
+    if (["settings", "categories", "specialties", "system_control"].includes(collection)) {
+      return {
+        id: String(payload.id || collection),
+        value: payload.value !== undefined ? payload.value : payload,
+        payload,
+        updated_at
+      };
+    }
+
     return {
       id: String(payload.id),
-      date: date || null,
-      month: month || null,
-      file_no: payload.fileNo || null,
-      patient: payload.patient || payload.name || null,
-      phone: payload.phone || null,
-      doctor_id: payload.doctorId || payload.docId || null,
-      doctor_name: payload.doctorName || null,
-      exam_type: payload.examType || payload.type || null,
-      services: Array.isArray(payload.services) ? payload.services : [],
-      total: Number(payload.total || payload.amount || 0),
-      paid: Number(payload.paid || payload.paidAmount || 0),
-      payment_method: payload.paymentMethod || null,
-      status: payload.status || null,
-      notes: payload.notes || null,
-      linked_income_id: payload.linkedIncomeId || null,
-      next_visit_date: payload.nextVisitDate || null,
       payload,
-      updated_at: String(payload.updatedAt || payload.createdAt || new Date().toISOString())
+      updated_at
     };
   }
   function record(row) {
     if (!row) return {};
     const payload = row.payload || {};
-    return {
+    const res = {
       ...payload,
       id: String(row.id || payload.id || ""),
-      date: row.date || payload.date || payload.lastVisitDate || "",
-      month: row.month || payload.month || "",
-      fileNo: row.file_no || payload.fileNo || "",
-      patient: row.patient || payload.patient || payload.name || "",
-      phone: row.phone || payload.phone || "",
-      doctorId: row.doctor_id || payload.doctorId || payload.docId || "",
-      doctorName: row.doctor_name || payload.doctorName || "",
-      examType: row.exam_type || payload.examType || payload.type || "",
-      services: row.services || payload.services || [],
-      total: row.total !== undefined && row.total !== null && row.total !== "" ? Number(row.total) : (payload.total !== undefined ? Number(payload.total) : Number(payload.amount || 0)),
-      paid: row.paid !== undefined && row.paid !== null && row.paid !== "" ? Number(row.paid) : (payload.paid !== undefined ? Number(payload.paid) : Number(payload.paidAmount || 0)),
-      paymentMethod: row.payment_method || payload.paymentMethod || "",
-      status: row.status || payload.status || "",
-      notes: row.notes || payload.notes || "",
-      linkedIncomeId: row.linked_income_id || payload.linkedIncomeId || "",
-      nextVisitDate: row.next_visit_date || payload.nextVisitDate || ""
+      updatedAt: row.updated_at || payload.updatedAt || payload.createdAt || ""
     };
+    if (row.date !== undefined && row.date !== null) res.date = row.date;
+    if (row.month !== undefined && row.month !== null) res.month = row.month;
+    if (row.file_no !== undefined && row.file_no !== null) res.fileNo = row.file_no;
+    if (row.patient !== undefined && row.patient !== null) res.patient = row.patient;
+    if (row.phone !== undefined && row.phone !== null) res.phone = row.phone;
+    if (row.doctor_id !== undefined && row.doctor_id !== null) res.doctorId = row.doctor_id;
+    if (row.doctor_name !== undefined && row.doctor_name !== null) res.doctorName = row.doctor_name;
+    if (row.exam_type !== undefined && row.exam_type !== null) res.examType = row.exam_type;
+    if (row.services !== undefined && row.services !== null) res.services = row.services;
+    if (row.total !== undefined && row.total !== null && row.total !== "") res.total = Number(row.total);
+    if (row.paid !== undefined && row.paid !== null && row.paid !== "") res.paid = Number(row.paid);
+    if (row.payment_method !== undefined && row.payment_method !== null) res.paymentMethod = row.payment_method;
+    if (row.status !== undefined && row.status !== null) res.status = row.status;
+    if (row.notes !== undefined && row.notes !== null) res.notes = row.notes;
+    if (row.linked_income_id !== undefined && row.linked_income_id !== null) res.linkedIncomeId = row.linked_income_id;
+    if (row.next_visit_date !== undefined && row.next_visit_date !== null) res.nextVisitDate = row.next_visit_date;
+
+    // Doctor & Employee fields
+    if (row.name !== undefined && row.name !== null && !res.name) res.name = row.name;
+    if (row.specialty !== undefined && row.specialty !== null) res.specialty = row.specialty;
+    if (row.fee_mode !== undefined && row.fee_mode !== null) res.feeMode = row.fee_mode;
+    if (row.clinic_pct !== undefined && row.clinic_pct !== null) res.clinicPct = Number(row.clinic_pct);
+    if (row.doc_pct !== undefined && row.doc_pct !== null) res.docPct = Number(row.doc_pct);
+    if (row.checkup_clinic_fee !== undefined && row.checkup_clinic_fee !== null) res.checkupClinicFee = Number(row.checkup_clinic_fee);
+    if (row.role !== undefined && row.role !== null) res.role = row.role;
+    if (row.base_salary !== undefined && row.base_salary !== null) res.baseSalary = Number(row.base_salary);
+
+    // Finance (income / expense) fields
+    if (row.party !== undefined && row.party !== null) res.party = row.party;
+    if (row.category !== undefined && row.category !== null) res.category = row.category;
+    if (row.description !== undefined && row.description !== null) {
+      res.description = row.description;
+      if (!res.desc) res.desc = row.description;
+    }
+    if (row.amount !== undefined && row.amount !== null && row.amount !== "") res.amount = Number(row.amount);
+    if (row.receipt_no !== undefined && row.receipt_no !== null) res.receiptNo = row.receipt_no;
+    if (row.linked_visit_id !== undefined && row.linked_visit_id !== null) res.linkedVisitId = row.linked_visit_id;
+
+    // Payroll fields
+    if (row.employee_id !== undefined && row.employee_id !== null) res.employeeId = row.employee_id;
+    if (row.employee_name !== undefined && row.employee_name !== null) res.employeeName = row.employee_name;
+    if (row.salary !== undefined && row.salary !== null && row.salary !== "") res.salary = Number(row.salary);
+    if (row.bonus !== undefined && row.bonus !== null && row.bonus !== "") res.bonus = Number(row.bonus);
+    if (row.deductions !== undefined && row.deductions !== null && row.deductions !== "") res.deductions = Number(row.deductions);
+    if (row.net_salary !== undefined && row.net_salary !== null && row.net_salary !== "") res.netSalary = Number(row.net_salary);
+
+    return res;
   }
   function metric(key, count) { READ_METRICS.queries++; READ_METRICS.documents += Number(count || 0); READ_METRICS.byKey[key] = (READ_METRICS.byKey[key] || 0) + Number(count || 0); READ_METRICS.lastReadAt = new Date().toISOString(); }
   function apiUrl(path) { return API_BASE + path; }
@@ -751,7 +886,49 @@
   async function updateOwnSecurityMetadata(metadata) { return profileRequest("metadata", { metadata }); }
   async function changePassword(_username, _currentPassword, newPassword) { const { data, error } = await init().auth.updateUser({ password: String(newPassword || "") }); if (error) throw error; return data.user; }
   async function getMonthRecords(key, month) { const last = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).getUTCDate(); return (await getPage(key, { pageSize: 100, where: [{ field: "date", op: ">=", value: `${month}-01` }, { field: "date", op: "<=", value: `${month}-${String(last).padStart(2, "0")}` }] })).records; }
-  async function getFinancialSummary(month = "all") { return fetchJson(`/api/financial/summary?month=${encodeURIComponent(month)}`, { headers: { Authorization: `Bearer ${await accessToken()}` } }); }
+  async function getFinancialSummary(month = "all") {
+    try {
+      const token = await accessToken();
+      const res = await fetchJson(`/api/financial/summary?month=${encodeURIComponent(month)}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (res && res.income && typeof res.income.total === "number" && (res.income.total > 0 || res.expense.total > 0 || !client)) {
+        return res;
+      }
+    } catch (_e) {}
+    if (client) {
+      try {
+        let qIn = client.from("income").select("amount, date");
+        let qEx = client.from("expense").select("amount, date");
+        if (month !== "all") {
+          const last = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).getUTCDate();
+          const start = `${month}-01`;
+          const end = `${month}-${String(last).padStart(2, "0")}`;
+          qIn = qIn.gte("date", start).lte("date", end);
+          qEx = qEx.gte("date", start).lte("date", end);
+        }
+        const [rIn, rEx] = await Promise.all([qIn, qEx]);
+        const incRows = Array.isArray(rIn.data) ? rIn.data : [];
+        const expRows = Array.isArray(rEx.data) ? rEx.data : [];
+        const totalIncome = incRows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+        const totalExpense = expRows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+        return {
+          month,
+          income: { total: totalIncome, count: incRows.length },
+          expense: { total: totalExpense, count: expRows.length },
+          totalIncome,
+          totalExpense,
+          net: totalIncome - totalExpense
+        };
+      } catch (_clientErr) {}
+    }
+    return {
+      month,
+      income: { total: 0, count: 0 },
+      expense: { total: 0, count: 0 },
+      totalIncome: 0,
+      totalExpense: 0,
+      net: 0
+    };
+  }
   async function getReportsData(options = {}) { const p = new URLSearchParams({ range: String(options.range || 6), closingMonth: String(options.closingMonth || ""), annualYear: String(options.annualYear || ""), doctorMonth: String(options.doctorMonth || ""), includeAnnual: String(options.includeAnnual ?? "") }); if (options.scope) p.set("scope", options.scope); return fetchJson(`/api/financial/reports?${p}`, { headers: { Authorization: `Bearer ${await accessToken()}` } }); }
   const getDoctorMonthReport = month => getReportsData({ scope: "doctors", doctorMonth: month });
   const adminCreateAccount = payload => adminRequest({ action: "create", ...payload });
