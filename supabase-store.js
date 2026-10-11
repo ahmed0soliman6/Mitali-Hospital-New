@@ -290,10 +290,7 @@
       let from = 0;
       const batchSize = 1000;
       while (true) {
-        let res = await client.from(col).select("*").order("updated_at", { ascending: false }).range(from, from + batchSize - 1);
-        if (res.error) {
-          res = await client.from("data_records").select("id,payload").eq("collection", col).order("updated_at", { ascending: false }).range(from, from + batchSize - 1);
-        }
+        const res = await client.from(col).select("*").order("updated_at", { ascending: false }).range(from, from + batchSize - 1);
         if (res.error) {
           console.error("Supabase getTable error for " + col + ":", res.error);
           throw Object.assign(new Error(res.error.message || "Supabase getTable failed"), { code: res.error.code, table: col });
@@ -316,16 +313,15 @@
     metric(key, rows.length);
     return rows.map(record);
   }
-  function applyWhere(q, filters, isExplicit = false) {
+  function applyWhere(q, filters, isExplicit = true) {
     for (const f of (Array.isArray(filters) ? filters : filters ? [filters] : [])) {
       if (!f?.field || f.value === undefined) continue;
       const colField = f.field === "date" ? "date" : f.field === "month" ? "month" : f.field === "patient" ? "patient" : f.field === "fileNo" ? "file_no" : f.field;
-      const field = isExplicit ? colField : (f.field === "date" ? "date_text" : f.field === "month" ? "month_text" : `payload->>${f.field}`);
-      if (f.op === "==") q = q.eq(field, String(f.value));
-      else if (f.op === ">=") q = q.gte(field, String(f.value));
-      else if (f.op === "<=") q = q.lte(field, String(f.value));
-      else if (f.op === ">") q = q.gt(field, String(f.value));
-      else if (f.op === "<") q = q.lt(field, String(f.value));
+      if (f.op === "==") q = q.eq(colField, String(f.value));
+      else if (f.op === ">=") q = q.gte(colField, String(f.value));
+      else if (f.op === "<=") q = q.lte(colField, String(f.value));
+      else if (f.op === ">") q = q.gt(colField, String(f.value));
+      else if (f.op === "<") q = q.lt(colField, String(f.value));
     }
     return q;
   }
@@ -347,20 +343,7 @@
         const from = (targetPage - 1) * pageSize;
         q = q.range(from, from + pageSize - 1);
       }
-      let { data, error } = await q;
-      if (error) {
-        let legacyQ = client.from("data_records").select("id,payload,date_text,month_text,updated_at").eq("collection", collection);
-        legacyQ = applyWhere(legacyQ, options.where, false);
-        const legOrder = options.orderField === "month" ? "month_text" : options.orderField === "updatedAt" ? "updated_at" : "date_text";
-        legacyQ = legacyQ.order(legOrder, { ascending: false, nullsFirst: false }).order("updated_at", { ascending: false }).order("id", { ascending: false });
-        const from = (targetPage - 1) * pageSize;
-        legacyQ = legacyQ.range(from, from + pageSize - 1);
-        const legRes = await legacyQ;
-        if (!legRes.error) {
-          data = legRes.data;
-          error = null;
-        }
-      }
+      const { data, error } = await q;
       if (error) {
         console.error("Supabase getPage error for " + collection + ":", error);
         throw Object.assign(new Error(error.message || "Supabase getPage failed"), { code: error.code, table: collection });
@@ -368,7 +351,7 @@
       if (Array.isArray(data)) {
         metric(key, data.length);
         const records = data.map(record), last = data[data.length - 1];
-        return { records, pageSize, hasMore: data.length === pageSize, nextCursor: last ? { primaryValue: last[order] || last["date_text"] || "", documentId: last.id } : null };
+        return { records, pageSize, hasMore: data.length === pageSize, nextCursor: last ? { primaryValue: last[order] || "", documentId: last.id } : null };
       }
     }
     if (window.MITALI_IS_PROD) {
@@ -405,18 +388,8 @@
         const expChunk = expRows.slice(i, i + chunkSize);
         const { error: expErr } = await client.from(col).upsert(expChunk, { onConflict: "id" });
         if (expErr) {
-          console.warn(`Supabase upsert explicitly to ${col} warning/retry:`, expErr.message);
-          const legacyRows = validRecs.slice(i, i + chunkSize).map(r => rowFromRecord(col, r));
-          const { error: legErr } = await client.from("data_records").upsert(legacyRows, { onConflict: "collection,id" });
-          if (legErr) {
-            console.error("Supabase upsertRecords error for " + col + ":", expErr || legErr);
-            throw Object.assign(new Error(expErr.message || legErr.message || "Supabase upsert failed"), { code: expErr.code || legErr.code, table: col });
-          }
-        } else {
-          try {
-            const legacyChunk = validRecs.slice(i, i + chunkSize).map(r => rowFromRecord(col, r));
-            await client.from("data_records").upsert(legacyChunk, { onConflict: "collection,id" });
-          } catch (_e) { /* ignore if data_records doesn't exist */ }
+          console.error("Supabase upsertRecords error for " + col + ":", expErr);
+          throw Object.assign(new Error(expErr.message || "Supabase upsert failed"), { code: expErr.code, table: col });
         }
       }
       return;
@@ -447,13 +420,8 @@
         const chunk = idsArr.slice(i, i + chunkSize);
         const { error: expErr } = await client.from(col).delete().in("id", chunk);
         if (expErr) {
-          const { error: legErr } = await client.from("data_records").delete().eq("collection", col).in("id", chunk);
-          if (legErr && expErr) {
-            console.error("Supabase deleteRecords error for " + col + ":", expErr);
-            throw Object.assign(new Error(expErr.message || legErr.message || "Supabase delete failed"), { code: expErr.code || legErr.code, table: col });
-          }
-        } else {
-          try { await client.from("data_records").delete().eq("collection", col).in("id", chunk); } catch (_e) {}
+          console.error("Supabase deleteRecords error for " + col + ":", expErr);
+          throw Object.assign(new Error(expErr.message || "Supabase delete failed"), { code: expErr.code, table: col });
         }
       }
       return;
@@ -468,16 +436,9 @@
   async function setTable(key, records) {
     await ready();
     const collection = collectionName(key), keep = records.map(r => String(r.id));
-    try {
-      let q = client.from(collection).delete();
-      if (keep.length) q = q.not("id", "in", `(${keep.join(",")})`);
-      await q;
-    } catch (_e) {
-      try {
-        let q = client.from("data_records").delete().eq("collection", collection);
-        if (keep.length) q = q.not("id", "in", `(${keep.join(",")})`);
-        await q;
-      } catch (_err) {}
+    if (keep.length) {
+      const { error } = await client.from(collection).delete().not("id", "in", `(${keep.join(",")})`);
+      if (error) console.warn("Supabase setTable delete extraneous error for " + collection + ":", error);
     }
     await upsertRecords(key, records);
     return records;
@@ -487,7 +448,7 @@
       init();
       const collection = collectionName(key);
       if (client?.channel) {
-        const channel = client.channel(`data-${collection}-${Math.random()}`).on("postgres_changes", { event: "*", schema: "public", table: "data_records", filter: `collection=eq.${collection}` }, payload => {
+        const channel = client.channel(`data-${collection}-${Math.random()}`).on("postgres_changes", { event: "*", schema: "public", table: collection }, payload => {
           const row = payload.new || payload.old;
           if (row) onChange([{ type: payload.eventType === "INSERT" ? "added" : payload.eventType === "DELETE" ? "removed" : "modified", record: record(row) }]);
         }).subscribe(status => {
@@ -579,10 +540,6 @@
       try {
         const { data } = await client.from(collName).select("*").eq("id", id).maybeSingle();
         if (data) existing = record(data);
-        else {
-          const resLeg = await client.from("data_records").select("id,payload").eq("collection", collName).eq("id", id).maybeSingle();
-          if (resLeg.data?.payload) existing = resLeg.data.payload;
-        }
       } catch (_e) {}
     }
 
@@ -590,33 +547,48 @@
     const total = Number(visit.total || 0);
     const due = Math.max(0, total - paid);
 
-    let doc;
-    if (existing) {
-      const isNewer = !existing.lastVisitDate || visitDate >= existing.lastVisitDate;
-      doc = {
-        ...existing,
-        name: rawName || existing.name,
-        phone: phone || existing.phone,
-        fileNo: fileNo || existing.fileNo,
-        patientKey: id,
-        lastVisitDate: isNewer ? visitDate : existing.lastVisitDate,
-        lastVisitCreatedAt: isNewer ? visitCreatedAt : existing.lastVisitCreatedAt,
-        updatedAt: isNewer ? visitCreatedAt : existing.updatedAt,
-        visitsCount: (Number(existing.visitsCount) || 1) + 1,
-        totalPaid: (Number(existing.totalPaid) || 0) + paid,
-        totalDue: Math.max(0, (Number(existing.totalDue) || 0) + due)
-      };
-    } else {
-      doc = {
-        id, name: rawName, phone, fileNo, patientKey: id,
-        lastVisitDate: visitDate,
-        lastVisitCreatedAt: visitCreatedAt,
-        updatedAt: visitCreatedAt,
-        visitsCount: 1,
-        totalPaid: paid,
-        totalDue: due
-      };
+    // حساب المجاميع والعدّاد من واقع زيارات المريض الفعلية بدلاً من الجمع الأعمى عند كل حفظ
+    let visitsCount = 1;
+    let totalPaid = paid;
+    let totalDue = due;
+    let lastVisitDate = visitDate;
+    let lastVisitCreatedAt = visitCreatedAt;
+
+    try {
+      const patientVisits = await getPatientVisits(isDental ? "dental" : "clinic", { name: rawName, phone, fileNo });
+      const vMap = new Map((patientVisits || []).map(v => [String(v.id), v]));
+      if (visit && visit.id) vMap.set(String(visit.id), { ...(vMap.get(String(visit.id)) || {}), ...visit });
+      const allList = Array.from(vMap.values());
+      if (allList.length > 0) {
+        visitsCount = allList.length;
+        totalPaid = allList.reduce((s, v) => s + (Number(v.paid) || 0), 0);
+        totalDue = Math.max(0, allList.reduce((s, v) => s + Math.max(0, (Number(v.total || v.amount || 0) - (Number(v.paid) || 0))), 0));
+        allList.sort((a, b) => String(b.date || b.createdAt || "").localeCompare(String(a.date || a.createdAt || "")));
+        if (allList[0]?.date) lastVisitDate = allList[0].date;
+        if (allList[0]?.createdAt) lastVisitCreatedAt = allList[0].createdAt;
+      }
+    } catch (_err) {
+      if (existing) {
+        visitsCount = existing.visitsCount || 1;
+        totalPaid = existing.totalPaid || paid;
+        totalDue = existing.totalDue || due;
+      }
     }
+
+    const doc = {
+      ...(existing || {}),
+      id,
+      name: rawName || existing?.name || "",
+      phone: phone || existing?.phone || "",
+      fileNo: fileNo || existing?.fileNo || "",
+      patientKey: id,
+      lastVisitDate,
+      lastVisitCreatedAt,
+      updatedAt: new Date().toISOString(),
+      visitsCount,
+      totalPaid,
+      totalDue
+    };
     return upsertRecord(collectionKey, doc);
   }
   async function getPatientVisits(kind, filter = {}) {
@@ -680,9 +652,6 @@
       let from = 0;
       while (true) {
         let res = await client.from(t.visitColl).select("*").range(from, from + 999);
-        if (res.error || !res.data) {
-          res = await client.from("data_records").select("id,payload,date_text,created_at").eq("collection", t.visitColl).range(from, from + 999);
-        }
         if (res.error || !res.data) break;
         allVisits = allVisits.concat(res.data);
         if (res.data.length < 1000) break;
@@ -753,17 +722,28 @@
       const res = await profileRequest("get");
       if (res?.profile) return res.profile;
     } catch (_e) {}
-    const u = currentUser() || { id: uid || "supabase-admin" };
-    const isManager = (u.id === "supabase-admin" || u.username === "admin" || !uid || uid === "supabase-admin");
+    const u = currentUser();
+    const isDevAdmin = !window.MITALI_IS_PROD && ((u && (u.id === "supabase-admin" || u.username === "admin")) || uid === "supabase-admin");
+    if (isDevAdmin) {
+      return {
+        id: "supabase-admin",
+        displayName: "مدير النظام",
+        username: "admin",
+        role: "مدير",
+        status: "نشط",
+        permissions: {
+          dashboard:{view:true},doctors:{view:true,add:true,edit:true,delete:true},employees:{view:true,add:true,edit:true,delete:true},clinic:{view:true,add:true,edit:true,delete:true},dental:{view:true,add:true,edit:true,delete:true},operations:{view:true,add:true,edit:true,delete:true},labs:{view:true,add:true,edit:true,delete:true},radiology:{view:true,add:true,edit:true,delete:true},patientFilesClinic:{view:true},patientFilesDental:{view:true},income:{view:true,add:true,edit:true,delete:true},expense:{view:true,add:true,edit:true,delete:true},ledger:{view:true},outstandingBalancesClinic:{view:true},outstandingBalancesDental:{view:true},outstandingBalancesOperations:{view:true},outstandingBalancesLabs:{view:true},outstandingBalancesRadiology:{view:true},outstandingBalances:{view:true},reports:{view:true},payroll:{view:true,add:true,edit:true,delete:true},categories:{view:true,add:true,edit:true,delete:true},users:{view:true,add:true,edit:true,delete:true,editPerms:true},settings:{edit:true,backup:true,restore:true}
+        },
+        credentialVersion: 1, securityVersion: 1
+      };
+    }
     return {
-      id: u.id || uid || "supabase-admin",
-      displayName: isManager ? "مدير النظام" : (u.displayName || "موظف"),
-      username: isManager ? "admin" : (u.username || "user"),
-      role: isManager ? "مدير" : "موظف",
+      id: u?.id || uid || "",
+      displayName: u?.displayName || u?.user_metadata?.display_name || "",
+      username: u?.username || "",
+      role: "موظف",
       status: "نشط",
-      permissions: isManager ? {
-        dashboard:{view:true},doctors:{view:true,add:true,edit:true,delete:true},employees:{view:true,add:true,edit:true,delete:true},clinic:{view:true,add:true,edit:true,delete:true},dental:{view:true,add:true,edit:true,delete:true},operations:{view:true,add:true,edit:true,delete:true},labs:{view:true,add:true,edit:true,delete:true},radiology:{view:true,add:true,edit:true,delete:true},patientFilesClinic:{view:true},patientFilesDental:{view:true},income:{view:true,add:true,edit:true,delete:true},expense:{view:true,add:true,edit:true,delete:true},ledger:{view:true},outstandingBalancesClinic:{view:true},outstandingBalancesDental:{view:true},outstandingBalancesOperations:{view:true},outstandingBalancesLabs:{view:true},outstandingBalancesRadiology:{view:true},outstandingBalances:{view:true},reports:{view:true},payroll:{view:true,add:true,edit:true,delete:true},categories:{view:true,add:true,edit:true,delete:true},users:{view:true,add:true,edit:true,delete:true,editPerms:true},settings:{edit:true,backup:true,restore:true}
-      } : {},
+      permissions: {},
       credentialVersion: 1, securityVersion: 1
     };
   }

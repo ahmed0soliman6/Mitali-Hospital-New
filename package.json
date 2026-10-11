@@ -52,7 +52,10 @@
     "express": "^4.21.2",
     "pg": "^8.23.1"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "pg-mem": "^3.0.14"
+  },
   "build": {
     "appId": "com.mitali.hospital",
     "productName": "Mitali Hospital",

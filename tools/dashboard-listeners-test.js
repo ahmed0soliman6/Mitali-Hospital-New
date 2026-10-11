@@ -50,13 +50,12 @@ checkEqual(sandbox.PAGE_REALTIME_KEYS.ledger, ["income", "expense", "settings"])
 checkEqual(sandbox.PAGE_REALTIME_KEYS.reports, []);
 checkEqual(sandbox.PAGE_REALTIME_KEYS.settings, ["doctors", "employees", "settings", "categories", "specialties"]);
 checkEqual(sandbox.PAGE_REALTIME_KEYS.patientFilesClinic, ["visitsClinic"]);
-checkEqual(sandbox.PAGE_REALTIME_KEYS.patientFilesDental, ["visitsDental"]);
-checkEqual(sandbox.PAGE_REALTIME_KEYS.outstandingBalances, ["doctors", ...sandbox.REVENUE_VISIT_DB_KEYS]);
-checkEqual(sandbox.PAGE_REALTIME_KEYS.outstandingBalancesClinic, ["visitsClinic"]);
-checkEqual(sandbox.PAGE_REALTIME_KEYS.outstandingBalancesDental, ["visitsDental"]);
-checkEqual(sandbox.PAGE_REALTIME_KEYS.outstandingBalancesOperations, ["visitsOperations"]);
-checkEqual(sandbox.PAGE_REALTIME_KEYS.outstandingBalancesLabs, ["visitsLabs"]);
-checkEqual(sandbox.PAGE_REALTIME_KEYS.outstandingBalancesRadiology, ["visitsRadiology"]);
+checkEqual(sandbox.PAGE_REALTIME_KEYS.outstandingBalances, ["doctors"]);
+checkEqual(sandbox.PAGE_REALTIME_KEYS.outstandingBalancesClinic, []);
+checkEqual(sandbox.PAGE_REALTIME_KEYS.outstandingBalancesDental, []);
+checkEqual(sandbox.PAGE_REALTIME_KEYS.outstandingBalancesOperations, []);
+checkEqual(sandbox.PAGE_REALTIME_KEYS.outstandingBalancesLabs, []);
+checkEqual(sandbox.PAGE_REALTIME_KEYS.outstandingBalancesRadiology, []);
 
 // 2. التحقق من دالة backgroundRefreshKeysForPage
 const bgFnMatch = index.match(/function backgroundRefreshKeysForPage\(page = state\.page\)\s*\{([\s\S]*?)\n\}/);

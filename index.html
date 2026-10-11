@@ -773,7 +773,7 @@ const LOCAL_DATA_KEYS_TO_CLEAR = [
 ];
 const CLOUD_BUSINESS_KEYS_TO_CLEAR = [
   "visitsClinic", "visitsDental", "visitsOperations", "visitsLabs", "visitsRadiology", "income", "expense",
-  "labExpenses", "patientFilesClinic", "patientFilesDental", "patientFileIndexClinic", "patientFileIndexDental", "auditLog"
+  "labExpenses", "patientFilesClinic", "patientFilesDental", "patientFileIndexClinic", "patientFileIndexDental"
 ];
 const DEFAULT_SETTINGS_AFTER_WIPE = {
   openingBalance: 0,
@@ -854,6 +854,19 @@ async function clearLocalHospitalData(options = {}) {
 // بالفعل في IDB_STORE_DATA، وبذلك لا نكرر نسخ بيانات المرضى داخل المتصفح.
 const SYNC_QUEUE_LOCAL_KEY = APP_PREFIX + "sync_queue_keys";
 const SYNC_QUEUE_KEYS = new Set();
+// معرّفات السجلات التي حُفظت محليًا ولم يؤكدها السيرفر بعد (مفتاح الجدول → Set<id>).
+// يُضاف المعرّف عند الحفظ المحلي ويُحذف بعد تأكيد upsert ناجح من Supabase.
+const PENDING_UPSERT_IDS = new Map(); // key -> Set<id>
+// معرّفات رفضتها RLS ولا يجب أن تُمسح بصمت — تُعرض للمستخدم.
+const RLS_FAILED_IDS = new Map(); // key -> Set<id>
+function getPendingIdsForKey(key) {
+  if (!PENDING_UPSERT_IDS.has(key)) PENDING_UPSERT_IDS.set(key, new Set());
+  return PENDING_UPSERT_IDS.get(key);
+}
+function getRlsFailedIdsForKey(key) {
+  if (!RLS_FAILED_IDS.has(key)) RLS_FAILED_IDS.set(key, new Set());
+  return RLS_FAILED_IDS.get(key);
+}
 let SYNC_QUEUE_READY = false;
 let SYNC_FLUSH_IN_PROGRESS = false;
 // حماية من عاصفة إعادة المحاولة عند RESOURCE_EXHAUSTED؛ إبقاء البيانات محليًا
@@ -1162,6 +1175,11 @@ async function storeSetInner(key, value) {
   try {
     if (STORAGE_MODE === "supabase" && window.MitaliSupabase) {
       await cacheLocally(key, value);
+      // تسجيل معرّفات السجلات الجديدة كـ"معلّقة" حتى يؤكدها السيرفر
+      if (Array.isArray(value) && !["settings", "categories", "specialties"].includes(key)) {
+        const pending = getPendingIdsForKey(key);
+        value.forEach(r => { if (r && r.id != null) pending.add(String(r.id)); });
+      }
       if (!navigator.onLine || SYNC_RETRY_BLOCKED_UNTIL > Date.now()) {
         await markSyncPending(key);
         renderStorageIndicator();
@@ -1180,6 +1198,9 @@ async function storeSetInner(key, value) {
         if (changed.length) await window.MitaliSupabase.upsertRecords(key, changed);
         if (deleted.length && window.MitaliSupabase.deleteRecords) await window.MitaliSupabase.deleteRecords(key, deleted);
         if (explicitDeleted.length) await clearSyncTombstones(key, explicitDeleted);
+        // إزالة المعرّفات من قائمة المعلّقة بعد نجاح الرفع
+        const pending = getPendingIdsForKey(key);
+        changed.forEach(r => { if (r && r.id != null) pending.delete(String(r.id)); });
       } else {
         await window.MitaliSupabase.setValue(key, value);
       }
@@ -1206,8 +1227,19 @@ async function storeSetInner(key, value) {
     if (STORAGE_MODE === "supabase") {
       const isPerm = e?.code === "42501" || String(e?.message || "").includes("row-level security") || String(e?.message || "").includes("violates");
       if (isPerm) {
-        console.warn(`Permission denied for "${key}"; clearing from sync queue:`, e.message);
+        // لا نُسقط السجل بصمت: ننقله إلى قائمة الفشل ونُعلم المستخدم
+        if (Array.isArray(value) && !["settings", "categories", "specialties"].includes(key)) {
+          const failed = getRlsFailedIdsForKey(key);
+          const pending = getPendingIdsForKey(key);
+          value.forEach(r => {
+            if (r && r.id != null) { pending.delete(String(r.id)); failed.add(String(r.id)); }
+          });
+        }
+        console.warn(`RLS rejected "${key}": permission denied. Records moved to RLS_FAILED_IDS.`, e.message);
         await clearSyncPending(key);
+        if (typeof showToast === "function") {
+          showToast(`⚠️ رُفض حفظ بيانات "${key}" لأن صلاحيتك لا تسمح بهذه العملية. تواصل مع المدير.`, 8000);
+        }
       } else {
         noteFirestoreQuotaError(e);
         await markSyncPending(key);
@@ -1694,10 +1726,10 @@ const PAGE_DATA_KEYS = {
   settings: ["doctors", "employees", "settings", "categories", "specialties"],
   users: [], permissions: [], auditlog: ["auditLog"],
   patientFilesClinic: ["doctors", "visitsClinic"], patientFilesDental: ["doctors", "visitsDental"],
-  outstandingBalances: ["doctors", "visitsClinic", "visitsDental", "visitsOperations", "visitsLabs", "visitsRadiology"],
-  outstandingBalancesClinic: ["doctors", "visitsClinic"], outstandingBalancesDental: ["doctors", "visitsDental"],
-  outstandingBalancesOperations: ["doctors", "visitsOperations"], outstandingBalancesLabs: ["doctors", "visitsLabs"],
-  outstandingBalancesRadiology: ["doctors", "visitsRadiology"], dataConflicts: []
+  outstandingBalances: ["doctors"],
+  outstandingBalancesClinic: [], outstandingBalancesDental: [],
+  outstandingBalancesOperations: [], outstandingBalancesLabs: [],
+  outstandingBalancesRadiology: [], dataConflicts: []
 };
 const PAGE_DATA_LOADING = new Map();
 const PAGE_DATA_LOADED_AT = Object.create(null);
@@ -1978,11 +2010,33 @@ async function loadFirestorePage(key, page = 1, options = {}) {
   }
   function mergePageWithLocal(serverList, currentLocal) {
     const list = Array.isArray(serverList) ? serverList.slice() : [];
+    // لا نُدمج إلا إذا كانت هذه هي الصفحة الأولى
+    if (page !== 1) return list;
+    // لا نُدمج إلا إذا كانت هناك معرّفات معلّقة فعلًا
+    const pendingIds = getPendingIdsForKey(key);
+    if (!pendingIds.size) return list;
     if (!Array.isArray(currentLocal) || !currentLocal.length) return list;
     const serverMap = new Map(list.map(r => [String(r && r.id), r]));
+    // الفلاتر النشطة: نتحقق أن السجل المعلّق يطابق نطاق التاريخ (date, month)
+    const activeWhere = queryOptions.where || [];
+    function recordMatchesFilters(item) {
+      for (const f of activeWhere) {
+        if (!f || !f.field || f.value === undefined) continue;
+        const v = String(item[f.field] || item[`payload_${f.field}`] || "");
+        const fv = String(f.value);
+        if (f.op === ">=" && !(v >= fv)) return false;
+        if (f.op === "<=" && !(v <= fv)) return false;
+        if (f.op === "==" && v !== fv) return false;
+        if (f.op === ">" && !(v > fv)) return false;
+        if (f.op === "<" && !(v < fv)) return false;
+      }
+      return true;
+    }
     currentLocal.forEach(item => {
-      if (item && item.id && !serverMap.has(String(item.id))) {
-        list.unshift(item);
+      if (item && item.id && pendingIds.has(String(item.id)) && !serverMap.has(String(item.id))) {
+        if (recordMatchesFilters(item)) {
+          list.unshift(item);
+        }
       }
     });
     return list;
@@ -1994,7 +2048,7 @@ async function loadFirestorePage(key, page = 1, options = {}) {
     return true;
   }
   try {
-    const result = await window.MitaliSupabase.getPage(key, Object.assign(queryOptions, options));
+    const result = await window.MitaliSupabase.getPage(key, Object.assign({ page }, queryOptions, options));
     pageState.pages[page] = Array.isArray(result.records) ? result.records.slice() : [];
     pageState.hasMore[page] = !!result.hasMore;
     pageState.cursors[page + 1] = result.nextCursor || null;
@@ -2038,7 +2092,7 @@ async function loadKeys(keys, options = {}) {
 // DB.income فارغًا وقيد الوارد يبقى يتيمًا بعد حذف الزيارة. نحمّل الوارد كاملًا
 // (مرة واحدة في الجلسة) قبل الحذف؛ وإن تعذّر ذلك نمنع الحذف بدل ترك وارد يتيم.
 async function ensureIncomeLoadedForVisitDelete(target) {
-  if (STORAGE_MODE !== "supabase" || !currentUser) return true;
+  if (STORAGE_MODE === "local" || !currentUser) return true;
   if (!target || !(target.linkedIncomeId || Number(target.paid) > 0)) return true;
   if (PAGE_DATA_LOADED_AT["income"]) return true;
   try {
@@ -2061,7 +2115,7 @@ function visitLinkFromIncome(inc) {
 // صفحة الوارد لا تحمّل جداول الزيارات؛ نحمّل أول صفحة من يومية القسم قبل الحذف حتى
 // لا تُكتب مصفوفة فارغة في الكاش وخط الأساس. إن تعذّر التحميل نمنع الحذف بالكامل.
 async function loadVisitsBeforeCascade(link) {
-  if (STORAGE_MODE !== "supabase" || !currentUser) return true;
+  if (STORAGE_MODE === "local" || !currentUser) return true;
   return !!(await loadFirestorePage(link.source.dbKey, 1, { force: true }));
 }
 async function cascadeDeleteVisitForIncome(link) {
@@ -2074,7 +2128,7 @@ async function cascadeDeleteVisitForIncome(link) {
   logActivity("حذف زيارة بسبب حذف الوارد المرتبط", link.source.kindKey, removed || { id: link.visitId }, null);
   await persist(key);
   // لقطة الصفحة المخزنة لم تعد صالحة: تُقرأ من جديد عند فتح اليومية.
-  if (STORAGE_MODE === "supabase") getFirestorePageState(key).pages = {};
+  if (STORAGE_MODE !== "local") getFirestorePageState(key).pages = {};
   const deletedMonth = (removed?.date || '').slice(0, 7);
   if (deletedMonth) invalidateDoctorReportsCache(deletedMonth);
 }
@@ -3524,8 +3578,6 @@ function backgroundRefreshKeysForPage(page = state.page) {
   return keys.filter(key =>
     !realtimeKeys.has(key) &&
     !firestoreRealtimeUnsubs.has(String(key)) &&
-    !SERVER_PAGED_KEYS.has(key) &&
-    key !== "income" && key !== "expense" &&
     !(page === "dashboard" && SERVER_PAGED_KEYS.has(key))
   );
 }
@@ -4142,7 +4194,7 @@ function reconcileVisitPageWithLive(snapshot, live, sortedList, isFirstPage, has
 }
 function firestorePageInfo(pageKey, list) {
   const dbKey = pageKeyDatabaseKey(pageKey);
-  if (STORAGE_MODE !== "supabase" || !dbKey || !getFirestorePageState(dbKey).pages[1]) return null;
+  if (STORAGE_MODE === "local" || !dbKey || !getFirestorePageState(dbKey).pages[1]) return null;
   const pageState = getFirestorePageState(dbKey);
   const current = pageState.currentPage || state.tablePage[pageKey] || 1;
   state.tablePage[pageKey] = current;
@@ -5983,8 +6035,8 @@ function renderOutstandingBalances(sectionKey) {
 
   const cacheKey = resolved === "dental" ? "dental" : "clinic";
   const indexError = SECTION_PATIENT_INDEX_ERRORS[cacheKey];
+  const debtors = groupPatients(outstandingVisits(meta)).filter(g => g.totalDue > 0.01).sort((a, b) => b.totalDue - a.totalDue);
   const patientIndexList = typeof getSectionPatientIndex === "function" ? getSectionPatientIndex(resolved || meta.listKey || sectionKey) : [];
-  const debtors = groupPatients(outstandingVisits(meta), patientIndexList).filter(g => g.totalDue > 0.01).sort((a, b) => b.totalDue - a.totalDue);
   const mismatches = getIndexReconciliationMismatches(debtors, patientIndexList);
   const info = outstandingPageInfo(debtors, `outstanding_${meta.listKey}`);
 

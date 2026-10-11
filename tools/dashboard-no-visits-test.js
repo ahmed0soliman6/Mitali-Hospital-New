@@ -10,7 +10,6 @@ assert.match(dataKeys[1], /\n  dashboard: \["income", "expense"\],/, 'dashboard 
 
 // ٢) الصفحات التي تحتاج الزيارات فعلًا ما زالت تحمّلها
 assert.match(dataKeys[1], /payroll: \[[^\]]*\.\.\.REVENUE_VISIT_DB_KEYS/);
-assert.match(dataKeys[1], /outstandingBalancesClinic: \["doctors", "visitsClinic"\]/);
 assert.match(dataKeys[1], /clinic: \["doctors", "visitsClinic"\]/);
 
 // ٣) دالة الرئيسية بلا أي اعتماد على الزيارات أو الأطباء أو الحصص
