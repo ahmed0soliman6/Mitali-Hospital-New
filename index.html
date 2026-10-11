@@ -1976,8 +1976,19 @@ async function loadFirestorePage(key, page = 1, options = {}) {
     page = 1;
     queryOptions = pageQueryOptions(key, page);
   }
+  function mergePageWithLocal(serverList, currentLocal) {
+    const list = Array.isArray(serverList) ? serverList.slice() : [];
+    if (!Array.isArray(currentLocal) || !currentLocal.length) return list;
+    const serverMap = new Map(list.map(r => [String(r && r.id), r]));
+    currentLocal.forEach(item => {
+      if (item && item.id && !serverMap.has(String(item.id))) {
+        list.unshift(item);
+      }
+    });
+    return list;
+  }
   if (!options.force && pageState.pages[page]) {
-    DB[key] = pageState.pages[page].slice();
+    DB[key] = mergePageWithLocal(pageState.pages[page], DB[key]);
     pageState.currentPage = page;
     delete FIRESTORE_PAGE_ERRORS[key];
     return true;
@@ -1988,7 +1999,7 @@ async function loadFirestorePage(key, page = 1, options = {}) {
     pageState.hasMore[page] = !!result.hasMore;
     pageState.cursors[page + 1] = result.nextCursor || null;
     pageState.currentPage = page;
-    DB[key] = pageState.pages[page].slice();
+    DB[key] = mergePageWithLocal(pageState.pages[page], DB[key]);
     PAGE_DATA_LOADED_AT[key] = Date.now();
     delete FIRESTORE_PAGE_ERRORS[key];
     return true;
