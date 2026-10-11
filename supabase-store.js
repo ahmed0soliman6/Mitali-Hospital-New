@@ -557,15 +557,25 @@
       const indexMap = new Map();
       for (const row of allVisits) {
         const v = row.payload || {};
-        const rawName = String(v.patient || v.name || "").replace(/\s+/g, " ").trim();
-        const phone = String(v.phone || "").trim();
-        const fileNo = String(v.fileNo || "").trim();
+        const rawName = String(v.patient || v.patientName || v.name || v.patient_name || "").replace(/\s+/g, " ").trim();
+        const phone = String(v.phone ?? v.mobile ?? "").trim();
+        const fileNo = String(v.fileNo ?? v.file_no ?? "").trim();
         if (!rawName && !phone && !fileNo) continue;
         const id = (fileNo ? `F:${fileNo}` : `N:${rawName.toLowerCase()}|${phone}`).replace(/\//g, "_").slice(0, 120);
         const visitDate = v.date || row.date_text || (row.created_at ? row.created_at.slice(0, 10) : "");
         const createdAt = v.createdAt || row.created_at || new Date().toISOString();
-        const paid = Number(v.paid || 0);
-        const total = Number(v.total || 0);
+        const legacyAmount = Number(v.amount) || 0;
+        const total = (v.total !== undefined && v.total !== null) ? (Number(v.total) || 0) : legacyAmount;
+        let paid;
+        if (v.paid !== undefined && v.paid !== null) {
+          paid = Number(v.paid) || 0;
+        } else if (v.status === "unpaid" || v.status === "غير مدفوع" || v.status === "متبقي" || v.status === "آجل") {
+          paid = 0;
+        } else if (v.amount !== undefined && v.amount !== null) {
+          paid = legacyAmount;
+        } else {
+          paid = 0;
+        }
         const due = Math.max(0, total - paid);
         const existing = indexMap.get(id);
         if (!existing) {
@@ -583,6 +593,7 @@
             existing.lastVisitCreatedAt = createdAt;
             existing.updatedAt = createdAt;
           }
+          if (!existing.name && rawName) existing.name = rawName;
           if (!existing.phone && phone) existing.phone = phone;
           if (!existing.fileNo && fileNo) existing.fileNo = fileNo;
         }

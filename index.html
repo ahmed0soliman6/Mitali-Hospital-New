@@ -2266,6 +2266,10 @@ async function ensureExactVisits(page) {
   if (page === "payroll" && plan.scope && typeof getUnifiedDoctorReport === "function") {
     visitLoads.push(getUnifiedDoctorReport(plan.scope).catch(e => console.warn("Prefetch doctor report failed:", e)));
   }
+  if ((page === "outstandingBalancesClinic" || page === "outstandingBalancesDental") && typeof loadSectionPatientIndex === "function") {
+    const sec = page === "outstandingBalancesDental" ? "dental" : "clinic";
+    visitLoads.push(loadSectionPatientIndex(sec).catch(e => console.warn("Prefetch patient index failed:", e)));
+  }
   await Promise.all(visitLoads);
 }
 function exactVisitsPlaceholderHTML(plan, title) {
@@ -2621,10 +2625,20 @@ function incomeDoctorShare(rec) {
   return { doc: amt * pct.doc, clinic: amt * pct.clinic };
 }
 function visitRemaining(v) {
+  if (!v || typeof v !== "object") return 0;
   const legacyAmount = Number(v.amount) || 0;
-  const total = v.total !== undefined && v.total !== null ? Number(v.total) || 0 : legacyAmount;
-  const paid = v.paid !== undefined && v.paid !== null ? Number(v.paid) || 0 : (v.amount !== undefined ? legacyAmount : 0);
-  return total - paid;
+  const total = (v.total !== undefined && v.total !== null) ? (Number(v.total) || 0) : legacyAmount;
+  let paid;
+  if (v.paid !== undefined && v.paid !== null) {
+    paid = Number(v.paid) || 0;
+  } else if (v.status === "unpaid" || v.status === "غير مدفوع" || v.status === "متبقي" || v.status === "آجل") {
+    paid = 0;
+  } else if (v.amount !== undefined && v.amount !== null) {
+    paid = legacyAmount;
+  } else {
+    paid = 0;
+  }
+  return Math.max(0, total - paid);
 }
 // مصدر موحّد لتسوية الطبيب عبر العيادات والأسنان والعمليات والتحاليل والأشعة.
 // حصة الطبيب قد تكون نسبة، أو نصيب المجمع الثابت لكل زيارة، أو أجرًا يوميًا.
@@ -2801,20 +2815,126 @@ function sortByEntryOrderDesc(list, legacyDateKeyFn) {
     return byDate !== 0 ? byDate : b.i - a.i;
   }).map(({ item }) => item);
 }
-function patientKey(v) {
-  const fn = (v.fileNo || "").trim();
-  if (fn) return "F:" + fn;
-  return "N:" + (v.patient || "").trim().toLowerCase() + "|" + (v.phone || "").trim();
+function getPatientFields(v) {
+  if (!v || typeof v !== "object") return { name: "", phone: "", fileNo: "" };
+  const rawName = v.patient ?? v.patientName ?? v.name ?? v.patient_name ?? "";
+  const name = String(rawName).replace(/\s+/g, " ").trim();
+  const rawPhone = v.phone ?? v.mobile ?? v.telephone ?? "";
+  const phone = String(rawPhone).replace(/\s+/g, " ").trim();
+  const rawFileNo = v.fileNo ?? v.file_no ?? v.fileno ?? "";
+  const fileNo = String(rawFileNo).trim();
+  return { name, phone, fileNo };
 }
-function groupPatients(visits) {
+function patientKey(v) {
+  if (!v) return "";
+  const { name, phone, fileNo } = getPatientFields(v);
+  if (fileNo) return "F:" + fileNo;
+  if (name || phone) return "N:" + name.toLowerCase() + "|" + phone;
+  return v.id ? `ID:${v.id}` : "";
+}
+function buildPatientIndexLookups(indexRecords) {
+  const byFileNo = new Map();
+  const byPhone = new Map();
+  const byNameAndPhone = new Map();
+  const byName = new Map();
+
+  if (!Array.isArray(indexRecords) || !indexRecords.length) {
+    return { byFileNo, byPhone, byNameAndPhone, byName, all: [] };
+  }
+
+  for (const p of indexRecords) {
+    if (!p || typeof p !== "object") continue;
+    const { name, phone, fileNo } = getPatientFields(p);
+    const key = p.id || p.patientKey || (fileNo ? `F:${fileNo}` : `N:${name.toLowerCase()}|${phone}`);
+    const normalized = { ...p, key, name, phone, fileNo };
+
+    if (fileNo && !byFileNo.has(fileNo)) {
+      byFileNo.set(fileNo, normalized);
+    }
+    if (phone) {
+      if (!byPhone.has(phone)) byPhone.set(phone, []);
+      byPhone.get(phone).push(normalized);
+    }
+    if (name && phone) {
+      byNameAndPhone.set(`${name.toLowerCase()}|${phone}`, normalized);
+    }
+    if (name) {
+      if (!byName.has(name.toLowerCase())) byName.set(name.toLowerCase(), []);
+      byName.get(name.toLowerCase()).push(normalized);
+    }
+  }
+
+  return { byFileNo, byPhone, byNameAndPhone, byName, all: indexRecords };
+}
+function matchVisitToPatientIndex(v, lookups) {
+  if (!lookups || !lookups.all || !lookups.all.length) return null;
+  const { name, phone, fileNo } = getPatientFields(v);
+
+  // 1. المطابقة برقم الملف أولاً
+  if (fileNo && lookups.byFileNo.has(fileNo)) {
+    return lookups.byFileNo.get(fileNo);
+  }
+
+  // 2. المطابقة بالاسم ورقم الهاتف معاً
+  if (name && phone && lookups.byNameAndPhone.has(`${name.toLowerCase()}|${phone}`)) {
+    return lookups.byNameAndPhone.get(`${name.toLowerCase()}|${phone}`);
+  }
+
+  // 3. المطابقة برقم الهاتف إذا كان فريداً وبلا تعارض في رقم الملف
+  if (phone && lookups.byPhone.has(phone)) {
+    const list = lookups.byPhone.get(phone);
+    if (list.length === 1) {
+      const candidate = list[0];
+      if (!fileNo || candidate.fileNo === fileNo) {
+        return candidate;
+      }
+    }
+  }
+
+  // 4. المطابقة بالاسم إذا كان فريداً وبلا تعارض هاتف أو ملف (تجنب ربط مريضين لتشابه الأسماء)
+  if (name && lookups.byName.has(name.toLowerCase())) {
+    const list = lookups.byName.get(name.toLowerCase());
+    if (list.length === 1) {
+      const candidate = list[0];
+      if ((!phone || candidate.phone === phone) && (!fileNo || candidate.fileNo === fileNo)) {
+        return candidate;
+      }
+    }
+  }
+
+  return null;
+}
+function groupPatients(visits, patientIndexList = null) {
+  const pList = Array.isArray(patientIndexList)
+    ? patientIndexList
+    : (Array.isArray(visits) && visits[0]?.kindKey && typeof getSectionPatientIndex === "function" ? getSectionPatientIndex(visits[0].kindKey) : []);
+  const lookups = buildPatientIndexLookups(pList);
   const map = new Map();
-  visits.forEach(v => {
-    const key = patientKey(v);
-    if (!map.has(key)) map.set(key, { key, name: "", phone: "", fileNos: new Set(), visits: [] });
+  (visits || []).forEach(v => {
+    if (!v) return;
+    const { name: vName, phone: vPhone, fileNo: vFileNo } = getPatientFields(v);
+    const matched = matchVisitToPatientIndex(v, lookups);
+    const key = (matched && (matched.id || matched.patientKey)) ? (matched.id || matched.patientKey) : patientKey(v);
+    if (!key) return;
+
+    if (!map.has(key)) {
+      map.set(key, {
+        key,
+        name: (matched && matched.name) || vName || "",
+        phone: (matched && matched.phone) || vPhone || "",
+        fileNo: (matched && matched.fileNo) || vFileNo || "",
+        fileNos: new Set(),
+        visits: [],
+        matchedIndexPatient: matched || null
+      });
+    }
     const g = map.get(key);
-    if (v.fileNo) g.fileNos.add(v.fileNo);
-    if (!g.name && v.patient) g.name = v.patient;
-    if (!g.phone && v.phone) g.phone = v.phone;
+    if (vFileNo) g.fileNos.add(vFileNo);
+    if (matched && matched.fileNo) g.fileNos.add(matched.fileNo);
+    if (!g.fileNo) g.fileNo = (matched && matched.fileNo) || vFileNo || "";
+    if (!g.name) g.name = (matched && matched.name) || vName || "";
+    if (!g.phone) g.phone = (matched && matched.phone) || vPhone || "";
+    if (!g.matchedIndexPatient && matched) g.matchedIndexPatient = matched;
     g.visits.push(v);
   });
   const today = todayISO();
@@ -5612,6 +5732,124 @@ function outstandingPaginationHTML(pageKey, info) {
     </div>
   </div>`;
 }
+const SECTION_PATIENT_INDEX_CACHE = { clinic: null, dental: null };
+const SECTION_PATIENT_INDEX_LOADING = new Map();
+
+async function loadSectionPatientIndex(sectionKey) {
+  const normKey = OUTSTANDING_PAGE_SECTION[sectionKey] || sectionKey;
+  const meta = OUTSTANDING_SECTION_META[normKey];
+  if (!meta || !meta.patientPage) return [];
+  const cacheKey = normKey === "dental" ? "dental" : "clinic";
+  if (Array.isArray(SECTION_PATIENT_INDEX_CACHE[cacheKey])) return SECTION_PATIENT_INDEX_CACHE[cacheKey];
+  if (Array.isArray(DB[meta.patientPage]) && DB[meta.patientPage].length) {
+    SECTION_PATIENT_INDEX_CACHE[cacheKey] = DB[meta.patientPage];
+    return SECTION_PATIENT_INDEX_CACHE[cacheKey];
+  }
+  const store = window.MitaliSupabase || window.MitaliFirebase;
+  if (store && typeof store.getTable === "function") {
+    if (!SECTION_PATIENT_INDEX_LOADING.has(cacheKey)) {
+      SECTION_PATIENT_INDEX_LOADING.set(cacheKey, store.getTable(meta.patientPage)
+        .then(records => {
+          SECTION_PATIENT_INDEX_CACHE[cacheKey] = Array.isArray(records) ? records : [];
+          return SECTION_PATIENT_INDEX_CACHE[cacheKey];
+        })
+        .catch(err => {
+          console.warn("Failed to load patient index for", normKey, err);
+          SECTION_PATIENT_INDEX_CACHE[cacheKey] = [];
+          return [];
+        })
+        .finally(() => SECTION_PATIENT_INDEX_LOADING.delete(cacheKey)));
+    }
+    return SECTION_PATIENT_INDEX_LOADING.get(cacheKey);
+  }
+  return [];
+}
+
+function getSectionPatientIndex(sectionKey) {
+  const normKey = OUTSTANDING_PAGE_SECTION[sectionKey] || sectionKey;
+  const meta = OUTSTANDING_SECTION_META[normKey];
+  if (!meta || !meta.patientPage) return [];
+  const cacheKey = normKey === "dental" ? "dental" : "clinic";
+  if (Array.isArray(SECTION_PATIENT_INDEX_CACHE[cacheKey])) return SECTION_PATIENT_INDEX_CACHE[cacheKey];
+  if (Array.isArray(DB[meta.patientPage]) && DB[meta.patientPage].length) {
+    SECTION_PATIENT_INDEX_CACHE[cacheKey] = DB[meta.patientPage];
+    return SECTION_PATIENT_INDEX_CACHE[cacheKey];
+  }
+  loadSectionPatientIndex(normKey).then(recs => {
+    if (recs && recs.length && state.page && state.page.startsWith("outstandingBalances")) {
+      route();
+    }
+  });
+  return [];
+}
+
+function getIndexReconciliationMismatches(debtors, patientIndexList) {
+  if (!Array.isArray(patientIndexList) || !patientIndexList.length) return [];
+  const matchedIndexIds = new Set();
+  const debtorByFileNo = new Map();
+  const debtorByPhone = new Map();
+
+  (debtors || []).forEach(d => {
+    if (d.key) matchedIndexIds.add(d.key);
+    if (d.matchedIndexPatient?.id) matchedIndexIds.add(d.matchedIndexPatient.id);
+    if (d.fileNo) debtorByFileNo.set(d.fileNo, d);
+    (d.fileNos || []).forEach(fn => debtorByFileNo.set(fn, d));
+    if (d.phone) debtorByPhone.set(d.phone, d);
+  });
+
+  const mismatches = [];
+  patientIndexList.forEach(p => {
+    if (!p) return;
+    const indexDue = Number(p.totalDue || 0);
+    if (indexDue <= 0.01) return;
+
+    const { name, phone, fileNo } = getPatientFields(p);
+    const pId = p.id || p.patientKey || (fileNo ? `F:${fileNo}` : `N:${name.toLowerCase()}|${phone}`);
+
+    let matchedDebtor = null;
+    if (matchedIndexIds.has(pId)) {
+      matchedDebtor = debtors.find(d => d.key === pId || d.matchedIndexPatient?.id === pId);
+    } else if (fileNo && debtorByFileNo.has(fileNo)) {
+      matchedDebtor = debtorByFileNo.get(fileNo);
+    } else if (phone && debtorByPhone.has(phone)) {
+      const candidate = debtorByPhone.get(phone);
+      if (!name || candidate.name.toLowerCase() === name.toLowerCase()) {
+        matchedDebtor = candidate;
+      }
+    }
+
+    if (!matchedDebtor) {
+      mismatches.push({
+        id: pId,
+        key: pId,
+        name: name || p.name || "مريض بدون اسم",
+        phone: phone || p.phone || "-",
+        fileNo: fileNo || p.fileNo || "-",
+        indexDue,
+        visitsDue: 0,
+        visitsCount: p.visitsCount || 0,
+        lastVisitDate: p.lastVisitDate || "-",
+        reason: "رصيد مستحق مسجل بملف المريض دون وجود سجلات زيارات غير مدفوعة مطابقة في اليومية"
+      });
+    } else if (Math.abs(matchedDebtor.totalDue - indexDue) > 0.01) {
+      mismatches.push({
+        id: pId,
+        key: pId,
+        name: name || matchedDebtor.name,
+        phone: phone || matchedDebtor.phone,
+        fileNo: fileNo || matchedDebtor.fileNo,
+        indexDue,
+        visitsDue: matchedDebtor.totalDue,
+        visitsCount: matchedDebtor.visits.length,
+        lastVisitDate: matchedDebtor.lastVisit?.date || p.lastVisitDate || "-",
+        reason: `فرق رصيد: اليومية (${fmt(matchedDebtor.totalDue)} ج.م) لا تطابق الفهرس (${fmt(indexDue)} ج.م)`
+      });
+    }
+  });
+
+  return mismatches;
+}
+
 function outstandingVisits(meta) {
   const exact = exactVisitRows(meta.listKey, "all");
   return (exact || DB[meta.listKey] || []).map(v => ({ ...v, kind: meta.kind, kindKey: meta.listKey }));
@@ -5630,8 +5868,9 @@ function renderOutstandingCard(meta, debtors, info) {
       <button class="btn ghost sm no-print" data-export-outstanding="${meta.listKey}">⬇️ تصدير</button>
     </div>
     <div class="table-wrap"><table>
-      <thead><tr><th>المريض</th><th>الهاتف</th><th>آخر زيارة</th><th>الزيارات</th><th>المتبقي</th><th></th></tr></thead>
-      <tbody>${debtors.length === 0 ? `<tr class="empty-row"><td colspan="6">لا يوجد مرضى عليهم مستحقات حاليًا 🎉</td></tr>` : info.pageItems.map(g => `<tr>
+      <thead><tr><th>رقم الملف</th><th>المريض</th><th>الهاتف</th><th>آخر زيارة</th><th>الزيارات</th><th>المتبقي</th><th></th></tr></thead>
+      <tbody>${debtors.length === 0 ? `<tr class="empty-row"><td colspan="7">لا يوجد مرضى عليهم مستحقات حاليًا 🎉</td></tr>` : info.pageItems.map(g => `<tr>
+        <td style="font-weight:600; color:var(--muted,#666);">${esc(g.fileNo || (g.fileNos && g.fileNos[0]) || "-")}</td>
         <td style="font-weight:700;">${esc(g.name || "-")}</td>
         <td>${esc(g.phone || "-")} ${waIconButtonHTML(g.phone, "wa-outstanding", `${meta.listKey}:${g.key}`)}</td>
         <td>${g.lastVisit?.date || "-"}</td><td>${g.visits.length}</td>
@@ -5644,12 +5883,35 @@ function renderOutstandingCard(meta, debtors, info) {
 }
 function renderOutstandingBalances(sectionKey) {
   const c = document.getElementById("content");
-  const meta = OUTSTANDING_SECTION_META[sectionKey];
+  const meta = OUTSTANDING_SECTION_META[sectionKey] || (typeof OUTSTANDING_PAGE_SECTION !== "undefined" && OUTSTANDING_PAGE_SECTION[sectionKey] ? OUTSTANDING_SECTION_META[OUTSTANDING_PAGE_SECTION[sectionKey]] : null);
   if (!meta || !canOutstandingSection(sectionKey)) { renderAccessDenied(); return; }
   if (!renderExactVisitsGate(c, state.page, `${meta.icon} ${meta.label}`)) return;
+  const patientIndexList = typeof getSectionPatientIndex === "function" ? getSectionPatientIndex(meta.listKey || sectionKey) : [];
   const debtors = groupPatients(outstandingVisits(meta)).filter(g => g.totalDue > 0.01).sort((a, b) => b.totalDue - a.totalDue);
+  const mismatches = getIndexReconciliationMismatches(debtors, patientIndexList);
   const info = outstandingPageInfo(debtors, `outstanding_${meta.listKey}`);
-  c.innerHTML = `<div class="outstanding-intro"><div class="section-title">${meta.icon} ${meta.label}</div><div class="hint">صفحة اليومية كاملة العرض للقسم المحدد. تعرض 20 اسمًا فقط في كل صفحة، مع ترقيم مستقل.</div></div><div class="outstanding-cards-grid">${renderOutstandingCard(meta, debtors, info)}</div>`;
+  const reconciliationHTML = mismatches.length === 0 ? "" : `
+    <div class="card" style="margin-top:20px; border:1.5px solid #F59E0B; background:#FFFBEB;">
+      <div class="section-title" style="color:#B45309; display:flex; align-items:center; gap:8px;">
+        <span>📋</span> تقرير مصالحة الأرصدة — أرصدة مستحقة مسجلة بالفهرس تختلف عن سجلات الزيارات (${mismatches.length})
+      </div>
+      <p class="hint" style="margin-top:4px; margin-bottom:12px; color:#92400E;">
+        هؤلاء المرضى مسجل لهم رصيد مستحق في ملف المريض، ولكن سجلات الزيارات الحالية لا تحتوي على مبالغ متبقية مطابقة. تم إظهارهم هنا للمراجعة والمصالحة الآمنة دون اختلاق زيارات وهمية.
+      </p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>رقم الملف</th><th>المريض</th><th>الهاتف</th><th>رصيد الفهرس</th><th>المتبقي باليومية</th><th>ملاحظة المصالحة</th><th></th></tr></thead>
+        <tbody>${mismatches.map(m => `<tr>
+          <td style="font-weight:600; color:var(--muted,#666);">${esc(m.fileNo || "-")}</td>
+          <td style="font-weight:700;">${esc(m.name || "-")}</td>
+          <td>${esc(m.phone || "-")} ${waIconButtonHTML(m.phone, "wa-outstanding", `${meta.listKey}:${m.key}`)}</td>
+          <td style="font-weight:700; color:#B45309;">${fmt(m.indexDue)} ج.م</td>
+          <td style="font-weight:700; color:${m.visitsDue > 0 ? "var(--expense)" : "var(--ink)"};">${fmt(m.visitsDue)} ج.م</td>
+          <td style="font-size:12px; color:#78350F;">${esc(m.reason)}</td>
+          <td>${meta.patientPage ? `<button class="btn sm ghost" data-open-outstanding="${meta.listKey}:${esc(m.key)}">عرض الملف</button>` : ""}</td>
+        </tr>`).join("")}</tbody>
+      </table></div>
+    </div>`;
+  c.innerHTML = `<div class="outstanding-intro"><div class="section-title">${meta.icon} ${meta.label}</div><div class="hint">صفحة اليومية كاملة العرض للقسم المحدد. تعرض 20 اسمًا فقط في كل صفحة، مع ترقيم مستقل.</div></div><div class="outstanding-cards-grid">${renderOutstandingCard(meta, debtors, info)}</div>${reconciliationHTML}`;
   c.querySelectorAll("[data-outstanding-page]").forEach(button => button.addEventListener("click", () => {
     state.tablePage[button.dataset.outstandingPage] = Number(button.dataset.pageTo) || 1;
     route();
@@ -5665,14 +5927,16 @@ function renderOutstandingBalances(sectionKey) {
     const [listKey, patientKey] = splitOutstandingTarget(button.dataset.waOutstanding);
     const found = Object.values(OUTSTANDING_SECTION_META).find(x => x.listKey === listKey);
     if (!found) return;
-    const debtor = groupPatients(outstandingVisits(found)).find(g => g.key === patientKey);
+    const pIdx = getSectionPatientIndex(found.listKey);
+    const debtor = groupPatients(outstandingVisits(found), pIdx).find(g => g.key === patientKey);
     if (debtor) openWhatsAppChat(debtor.phone, { patientName: debtor.name, orderNo: "", paid: debtor.totalPaid, remaining: debtor.totalDue });
   }));
   c.querySelectorAll("[data-export-outstanding]").forEach(button => button.addEventListener("click", () => {
     const found = Object.values(OUTSTANDING_SECTION_META).find(x => x.listKey === button.dataset.exportOutstanding);
     if (!found) return;
-    const currentDebtors = groupPatients(outstandingVisits(found)).filter(g => g.totalDue > 0.01).sort((a, b) => b.totalDue - a.totalDue);
-    exportTableToCSV(found.csv, ["المريض","الهاتف","آخر زيارة","عدد الزيارات","المبلغ المتبقي"], currentDebtors.map(g => [g.name, g.phone, g.lastVisit?.date || "", g.visits.length, g.totalDue]));
+    const pIdx = getSectionPatientIndex(found.listKey);
+    const currentDebtors = groupPatients(outstandingVisits(found), pIdx).filter(g => g.totalDue > 0.01).sort((a, b) => b.totalDue - a.totalDue);
+    exportTableToCSV(found.csv, ["رقم الملف","المريض","الهاتف","آخر زيارة","عدد الزيارات","المبلغ المتبقي"], currentDebtors.map(g => [g.fileNo || (g.fileNos && g.fileNos[0]) || "", g.name, g.phone, g.lastVisit?.date || "", g.visits.length, g.totalDue]));
   }));
 }
 // ======================================================================
