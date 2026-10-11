@@ -7,7 +7,7 @@
   const COLLECTIONS = Object.freeze({
     doctors: "doctors", employees: "employees", visitsClinic: "visits_clinic", visitsDental: "visits_dental",
     visitsOperations: "visits_operations", visitsLabs: "visits_labs", visitsRadiology: "visits_radiology",
-    income: "income", expense: "expense", payroll: "payroll", staffAccounts: "profiles", auditLog: "audit_log",
+    income: "income", expense: "expense", payroll: "payroll", staffAccounts: "staff_accounts", auditLog: "audit_log",
     labExpenses: "lab_expenses", categories: "categories", specialties: "specialties", settings: "settings",
     patientFilesClinic: "patient_file_index_clinic", patientFilesDental: "patient_file_index_dental",
     patientFileIndexClinic: "patient_file_index_clinic", patientFileIndexDental: "patient_file_index_dental",
@@ -288,6 +288,21 @@
       };
     }
 
+    if (collection === "staff_accounts") {
+      return {
+        id: String(payload.id),
+        username: payload.username || null,
+        display_name: payload.displayName || payload.display_name || payload.name || null,
+        role: payload.role || "موظف",
+        status: payload.status || "نشط",
+        permissions: payload.permissions || {},
+        credential_version: payload.credentialVersion != null ? Number(payload.credentialVersion) : 1,
+        security_version: payload.securityVersion != null ? Number(payload.securityVersion) : 1,
+        payload,
+        updated_at
+      };
+    }
+
     if (["settings", "categories", "specialties", "system_control"].includes(collection)) {
       return {
         id: String(payload.id || collection),
@@ -356,6 +371,16 @@
     if (row.bonus !== undefined && row.bonus !== null && row.bonus !== "") res.bonus = Number(row.bonus);
     if (row.deductions !== undefined && row.deductions !== null && row.deductions !== "") res.deductions = Number(row.deductions);
     if (row.net_salary !== undefined && row.net_salary !== null && row.net_salary !== "") res.netSalary = Number(row.net_salary);
+
+    // Staff Accounts fields
+    if (row.username !== undefined && row.username !== null) res.username = row.username;
+    if (row.display_name !== undefined && row.display_name !== null) {
+      res.displayName = row.display_name;
+      if (!res.name) res.name = row.display_name;
+    }
+    if (row.permissions !== undefined && row.permissions !== null) res.permissions = row.permissions;
+    if (row.credential_version !== undefined && row.credential_version !== null) res.credentialVersion = Number(row.credential_version);
+    if (row.security_version !== undefined && row.security_version !== null) res.securityVersion = Number(row.security_version);
 
     return res;
   }
