@@ -2279,9 +2279,9 @@ async function ensureExactVisits(page) {
   if (page === "payroll" && plan.scope && typeof getUnifiedDoctorReport === "function") {
     visitLoads.push(getUnifiedDoctorReport(plan.scope).catch(e => console.warn("Prefetch doctor report failed:", e)));
   }
-  if ((page === "outstandingBalancesClinic" || page === "outstandingBalancesDental") && typeof loadSectionPatientIndex === "function") {
-    const sec = page === "outstandingBalancesDental" ? "dental" : "clinic";
-    visitLoads.push(loadSectionPatientIndex(sec).catch(e => console.warn("Prefetch patient index failed:", e)));
+  if (page && page.startsWith("outstandingBalances") && typeof loadSectionPatientIndex === "function") {
+    visitLoads.push(loadSectionPatientIndex("clinic").catch(e => console.warn("Prefetch clinic patient index failed:", e)));
+    visitLoads.push(loadSectionPatientIndex("dental").catch(e => console.warn("Prefetch dental patient index failed:", e)));
   }
   await Promise.all(visitLoads);
 }
@@ -2639,15 +2639,40 @@ function incomeDoctorShare(rec) {
 }
 function visitRemaining(v) {
   if (!v || typeof v !== "object") return 0;
-  const legacyAmount = Number(v.amount) || 0;
-  const total = (v.total !== undefined && v.total !== null) ? (Number(v.total) || 0) : legacyAmount;
+  if (v.remaining !== undefined && v.remaining !== null && !isNaN(Number(v.remaining))) {
+    return Math.max(0, Number(v.remaining));
+  }
+  if (v.due !== undefined && v.due !== null && !isNaN(Number(v.due))) {
+    return Math.max(0, Number(v.due));
+  }
+  if (v.rest !== undefined && v.rest !== null && !isNaN(Number(v.rest))) {
+    return Math.max(0, Number(v.rest));
+  }
+  const total = (v.total !== undefined && v.total !== null)
+    ? (Number(v.total) || 0)
+    : ((v.totalAmount !== undefined && v.totalAmount !== null)
+      ? (Number(v.totalAmount) || 0)
+      : ((v.total_amount !== undefined && v.total_amount !== null)
+        ? (Number(v.total_amount) || 0)
+        : ((v.price !== undefined && v.price !== null)
+          ? (Number(v.price) || 0)
+          : ((v.cost !== undefined && v.cost !== null)
+            ? (Number(v.cost) || 0)
+            : (Number(v.amount) || 0)))));
+
   let paid;
   if (v.paid !== undefined && v.paid !== null) {
     paid = Number(v.paid) || 0;
+  } else if (v.paidAmount !== undefined && v.paidAmount !== null) {
+    paid = Number(v.paidAmount) || 0;
+  } else if (v.paid_amount !== undefined && v.paid_amount !== null) {
+    paid = Number(v.paid_amount) || 0;
   } else if (v.status === "unpaid" || v.status === "غير مدفوع" || v.status === "متبقي" || v.status === "آجل") {
     paid = 0;
+  } else if (v.total !== undefined || v.totalAmount !== undefined || v.total_amount !== undefined || v.price !== undefined) {
+    paid = v.amount !== undefined ? (Number(v.amount) || 0) : 0;
   } else if (v.amount !== undefined && v.amount !== null) {
-    paid = legacyAmount;
+    paid = Number(v.amount) || 0;
   } else {
     paid = 0;
   }
