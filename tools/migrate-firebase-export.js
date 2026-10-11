@@ -198,7 +198,8 @@ async function run() {
     }
   }
 
-  // 2. Process Business Collections
+  // 2. Process Business Collections (Group by Target Collection First)
+  const groupedCollections = {};
   for (const [key, targetCollection] of Object.entries(COLLECTIONS_MAP)) {
     const rawVal = sourceData[key];
     if (!rawVal) continue;
@@ -207,10 +208,16 @@ async function run() {
       records = rawVal;
     } else if (typeof rawVal === 'object' && rawVal !== null) {
       records = Object.entries(rawVal).map(([docId, docVal]) => ({ id: (docVal && docVal.id) || docId, ...(docVal || {}) }));
-    } else {
-      continue;
     }
     if (!records.length) continue;
+
+    if (!groupedCollections[targetCollection]) {
+      groupedCollections[targetCollection] = [];
+    }
+    groupedCollections[targetCollection].push(...records);
+  }
+
+  for (const [targetCollection, records] of Object.entries(groupedCollections)) {
     report.totalCollections++;
     report.collections[targetCollection] = { source: records.length, valid: 0, duplicates: 0, rejected: 0 };
     report.overallRecords.source += records.length;

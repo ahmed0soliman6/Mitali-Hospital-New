@@ -276,8 +276,14 @@
       q = applyWhere(q, options.where);
       const order = options.orderField === "month" ? "month_text" : options.orderField === "updatedAt" ? "updated_at" : "date_text";
       q = q.order(order, { ascending: false, nullsFirst: false }).order("updated_at", { ascending: false }).order("id", { ascending: false });
-      const from = (targetPage - 1) * pageSize;
-      q = q.range(from, from + pageSize - 1);
+      if (options.cursor && options.cursor.primaryValue !== undefined && options.cursor.documentId && !options.page) {
+        const pv = String(options.cursor.primaryValue);
+        const docId = String(options.cursor.documentId);
+        q = q.or(`${order}.lt."${pv}",and(${order}.eq."${pv}",id.lt."${docId}")`).limit(pageSize);
+      } else {
+        const from = (targetPage - 1) * pageSize;
+        q = q.range(from, from + pageSize - 1);
+      }
       const { data, error } = await q;
       if (error) {
         console.error("Supabase getPage error for " + collection + ":", error);
@@ -304,8 +310,10 @@
     }
     const order = options.orderField === "month" ? "month_text" : options.orderField === "updatedAt" ? "updated_at" : "date_text";
     rows.sort((a, b) => getRowField(b, order).localeCompare(getRowField(a, order)));
-    const records = rows.slice(0, pageSize).map(record);
-    return { records, pageSize, hasMore: rows.length > pageSize, nextCursor: null };
+    const from = (targetPage - 1) * pageSize;
+    const records = rows.slice(from, from + pageSize).map(record);
+    const last = records[records.length - 1];
+    return { records, pageSize, hasMore: rows.length > from + pageSize, nextCursor: last ? { primaryValue: last[order] || "", documentId: last.id } : null };
   }
   async function getValue(key, fallback) { const rows = await getTable(key); if (!rows.length) return fallback; if (["settings", "categories"].includes(key)) return rows[0]; if (key === "specialties") return Array.isArray(rows[0].value) ? rows[0].value : fallback; return rows; }
   async function upsertRecords(key, records) {

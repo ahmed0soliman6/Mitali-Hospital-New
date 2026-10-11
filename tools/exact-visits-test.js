@@ -31,7 +31,7 @@ const SOURCES = [
 const J = x => JSON.stringify(x);
 function make(extra = {}) {
   const calls = { table: [], page: [] };
-  const mk = n => Array.from({ length: n }, (_, i) => ({ id: 'r' + i, date: '2026-09-15', total: 10, paid: 5 }));
+  const mk = (n, offset = 0) => Array.from({ length: n }, (_, i) => ({ id: 'r' + (offset + i), date: '2026-09-15', total: 10, paid: 5 }));
   const sandbox = Object.assign({
     STORAGE_MODE: 'firestore', currentUser: { id: 'u' }, READ_CACHE_TTL_MS: 300000,
     VISIT_SOURCE_DEFINITIONS: SOURCES, state: { payrollMonth: '2026-09' },
@@ -40,8 +40,9 @@ function make(extra = {}) {
       getTable: async key => { calls.table.push(key); return mk(120); },
       getPage: async (key, opts) => {
         calls.page.push({ key, opts: JSON.parse(JSON.stringify(opts)) });
-        const n = opts.cursor ? Number(String(opts.cursor.documentId).slice(1)) + 1 : 1;
-        return { records: mk(50), hasMore: n < 3, nextCursor: { primaryValue: '2026-09-01', documentId: 'c' + n } };
+        const n = opts.cursor ? Number(String(opts.cursor.documentId).slice(1)) + 1 : (opts.page || 1);
+        const offset = (n - 1) * 50;
+        return { records: mk(50, offset), hasMore: n < 3, nextCursor: { primaryValue: '2026-09-01', documentId: 'c' + n } };
       },
     } },
     console: { warn() {} }, Date, Math, Number, String, Object, JSON, Promise, Error, RegExp, Array, Map,

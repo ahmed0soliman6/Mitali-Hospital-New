@@ -2222,14 +2222,29 @@ async function fetchExactVisitRows(key, scope) {
     { field: "date", op: "<=", value: `${scope}-${String(lastDay).padStart(2, "0")}` },
   ];
   const rows = [];
+  const seenIds = new Set();
   let cursor = null;
+  let page = 1;
+  let previousCount = 0;
   for (let i = 0; i < 400; i++) {
-    const result = await store.getPage(key, { pageSize: 50, cursor, where });
-    rows.push(...(Array.isArray(result.records) ? result.records : []));
-    if (!result.hasMore || !result.nextCursor) return rows;
+    const result = await store.getPage(key, { pageSize: 50, page, cursor, where });
+    const records = Array.isArray(result.records) ? result.records : [];
+    let addedCount = 0;
+    for (const r of records) {
+      if (r && r.id && !seenIds.has(r.id)) {
+        seenIds.add(r.id);
+        rows.push(r);
+        addedCount++;
+      }
+    }
+    if (!result.hasMore || !result.nextCursor || addedCount === 0 || rows.length === previousCount) {
+      return rows;
+    }
+    previousCount = rows.length;
     cursor = result.nextCursor;
+    page++;
   }
-  throw new Error("exact-visits-too-many-pages");
+  return rows;
 }
 async function ensureExactVisits(page) {
   const plan = exactVisitsPlan(page);
@@ -7415,20 +7430,50 @@ function renderSettings() {
         system_control: "systemControl"
       };
       const data = {};
+      let totalSourceRecords = 0;
+      let duplicateSourceRecords = 0;
+      let rejectedSourceRecords = 0;
+
+      // 1. Group records by canonical key across all collection aliases
       Object.entries(rawSource || {}).forEach(([k, v]) => {
+        if (!v) return;
         const canonicalKey = ALIASES[k] || k;
-        if (v && typeof v === "object" && !Array.isArray(v) && canonicalKey !== "settings") {
-          data[canonicalKey] = Object.entries(v).map(([id, doc]) => ({ id: (doc && doc.id) || id, ...(doc || {}) }));
-        } else {
-          data[canonicalKey] = v;
+        if (canonicalKey === "settings") {
+          data.settings = v;
+          return;
         }
+
+        let rawItems = [];
+        if (Array.isArray(v)) {
+          rawItems = v;
+        } else if (typeof v === "object" && v !== null) {
+          rawItems = Object.entries(v).map(([id, doc]) => ({ id: (doc && doc.id) || id, ...(doc || {}) }));
+        }
+
+        if (!data[canonicalKey]) data[canonicalKey] = [];
+        if (!Array.isArray(data[canonicalKey])) return;
+
+        rawItems.forEach(item => {
+          totalSourceRecords++;
+          if (!item || item.id == null) {
+            rejectedSourceRecords++;
+            return;
+          }
+          const itemId = String(item.id);
+          if (data[canonicalKey].some(x => String(x.id) === itemId)) {
+            duplicateSourceRecords++;
+          } else {
+            data[canonicalKey].push(item);
+          }
+        });
       });
 
-      // إذا كان الملف يحتوي على مصفوفة زيارات مجمّعة (visits) وزّعها على الأقسام
-      if (Array.isArray(rawSource.visits) || (rawSource.visits && typeof rawSource.visits === "object")) {
-        const unifiedVisits = Array.isArray(rawSource.visits)
-          ? rawSource.visits
-          : Object.entries(rawSource.visits).map(([id, doc]) => ({ id: (doc && doc.id) || id, ...(doc || {}) }));
+      // 2. Distribute unified visits array/object across department collections
+      const rawVisits = rawSource.visits || rawSource.visit_records;
+      if (rawVisits) {
+        const unifiedVisits = Array.isArray(rawVisits)
+          ? rawVisits
+          : (typeof rawVisits === "object" ? Object.entries(rawVisits).map(([id, doc]) => ({ id: (doc && doc.id) || id, ...(doc || {}) })) : []);
         unifiedVisits.forEach(v => {
           if (!v || !v.id) return;
           const k = String(v.kind || v.type || v.section || v.department || "").toLowerCase();
@@ -7438,12 +7483,15 @@ function renderSettings() {
             : k.includes("rad") || k.includes("xray") || k.includes("أشعة") ? "visitsRadiology"
             : "visitsClinic";
           data[target] = data[target] || [];
-          if (!data[target].some(x => x.id === v.id)) data[target].push(v);
+          if (!data[target].some(x => String(x.id) === String(v.id))) {
+            data[target].push(v);
+          } else {
+            duplicateSourceRecords++;
+          }
         });
       }
 
-      // إذا كان الملف يحتوي على قيود وارد ناتجة عن زيارات ولكن جداول الزيارات لم تُرفق بالملف:
-      // استرجع الزيارات فورًا من سجل الوارد حتى لا تكون اليوميات فارغة
+      // 3. Reconstruct visits from income if visit tables are absent
       const KIND_TO_LIST_MAP = {
         clinic: "visitsClinic",
         dental: "visitsDental",
@@ -7461,7 +7509,7 @@ function renderSettings() {
           if (!listKey) return;
           data[listKey] = data[listKey] || [];
           const visitId = inc.id.replace(`visit-income-${kind}-`, "");
-          if (!data[listKey].some(x => x.id === visitId)) {
+          if (!data[listKey].some(x => String(x.id) === String(visitId))) {
             let patientName = inc.party || "";
             if (!patientName && inc.desc) {
               const m = inc.desc.match(/—\s*([^()]+)/);
@@ -7469,13 +7517,16 @@ function renderSettings() {
             }
             const amt = Number(inc.amount) || 0;
             const fileNo = (inc.receiptNo && !inc.receiptNo.startsWith("V-m")) ? inc.receiptNo.replace(/^V-/, "") : "";
+            const docId = inc.doctorId || inc.docId || inc.doctor || "";
+            const docName = inc.doctorName || (typeof inc.doctor === "string" ? inc.doctor : "");
             const vObj = {
               id: visitId,
               date: inc.date || (inc.createdAt ? inc.createdAt.slice(0, 10) : todayISO()),
               patient: patientName || "مريض",
               fileNo: fileNo,
-              phone: "",
-              doctorId: inc.doctorId || "",
+              phone: inc.phone || "",
+              doctorId: docId,
+              doctorName: docName,
               total: amt,
               paid: amt,
               status: "تم",
@@ -7495,7 +7546,8 @@ function renderSettings() {
       const foundKeys = BACKUP_KEYS.filter(k => data && Object.prototype.hasOwnProperty.call(data, k));
       if (!foundKeys.length) { showToast("⚠️ لم يتم التعرف على هذا الملف كنسخة احتياطية للنظام"); restoreBackupInput.value = ""; return; }
       const when = parsed?.exportedAt ? new Date(parsed.exportedAt).toLocaleString("ar-EG") : "غير معروف";
-      if (!confirm(`سيتم استبدال كل بيانات النظام الحالية بنسخة بتاريخ: ${when}\nهذا الإجراء لا يمكن التراجع عنه. متأكد من المتابعة؟`)) { restoreBackupInput.value = ""; return; }
+      const totalImportedRecords = foundKeys.reduce((acc, k) => acc + (Array.isArray(data[k]) ? data[k].length : (data[k] ? 1 : 0)), 0);
+      if (!confirm(`تقرير الاستيراد:\n- إجمالي سجلات المصدر: ${totalSourceRecords}\n- سجلات صالحة للاستيراد: ${totalImportedRecords}\n- مكررة متجاوزة: ${duplicateSourceRecords}\n- مرفوضة: ${rejectedSourceRecords}\n\nتاريخ النسخة: ${when}\nهل تريد المتابعة واستبدال بيانات النظام بالنسخة المستوردة؟`)) { restoreBackupInput.value = ""; return; }
       showToast("جارٍ الاستعادة...", 60000);
       // إصلاح جوهري: الاستعادة كانت تمرّ بمسار الدمج الذكى العادى (المقارنة
       // بـ updatedAt)، فإذا كانت السحابة تحمل تعديلات أحدث زمنيًا من تاريخ
