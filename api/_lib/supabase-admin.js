@@ -45,7 +45,34 @@ function createMockQuery(tableName) {
   const getRows = () => {
     if (tableName === 'profiles') return Array.from(mockStore.profiles.values());
     if (tableName === 'data_records') return mockStore.data_records.slice();
-    return [];
+    // Explicit relational table mapping
+    return mockStore.data_records.filter(r => r.collection === tableName).map(r => {
+      const p = r.payload || {};
+      return {
+        id: r.id,
+        date: r.date_text || p.date || p.lastVisitDate || '',
+        month: r.month_text || p.month || '',
+        patient: p.patient || p.name || '',
+        phone: p.phone || '',
+        file_no: p.fileNo || '',
+        doctor_id: p.doctorId || p.docId || '',
+        doctor_name: p.doctorName || '',
+        exam_type: p.examType || p.type || '',
+        services: p.services || [],
+        total: Number(p.total || p.amount || 0),
+        paid: Number(p.paid || p.paidAmount || 0),
+        payment_method: p.paymentMethod || '',
+        status: p.status || '',
+        notes: p.notes || '',
+        linked_income_id: p.linkedIncomeId || '',
+        payload: p,
+        date_text: r.date_text || p.date || p.lastVisitDate || '',
+        month_text: r.month_text || p.month || '',
+        updated_at: r.updated_at || new Date().toISOString(),
+        created_at: r.created_at || new Date().toISOString(),
+        collection: r.collection
+      };
+    });
   };
 
   const matchRow = (row) => filters.every(f => f(row));
@@ -91,11 +118,12 @@ function createMockQuery(tableName) {
           matched.forEach(r => mockStore.profiles.delete(r.id));
           return { data: matched, count: matched.length, error: null };
         }
-      } else if (tableName === 'data_records') {
+      } else {
         if (op === 'delete') {
           const removed = [];
           mockStore.data_records = mockStore.data_records.filter(r => {
-            if (matchRow(r)) { removed.push(r); return false; }
+            const matchesTable = tableName === 'data_records' ? true : r.collection === tableName;
+            if (matchesTable && matchRow(r)) { removed.push(r); return false; }
             return true;
           });
           return { data: removed, count: removed.length, error: null };
@@ -103,9 +131,18 @@ function createMockQuery(tableName) {
         if (op === 'upsert' || op === 'insert') {
           const rows = Array.isArray(payload) ? payload : [payload];
           rows.forEach(r => {
-            const idx = mockStore.data_records.findIndex(x => x.collection === r.collection && String(x.id) === String(r.id));
-            if (idx >= 0) mockStore.data_records[idx] = { ...mockStore.data_records[idx], ...r };
-            else mockStore.data_records.push({ ...r });
+            const coll = tableName === 'data_records' ? (r.collection || 'default') : tableName;
+            const rec = {
+              collection: coll,
+              id: String(r.id),
+              payload: r.payload || r,
+              date_text: r.date_text || r.date || r.payload?.date || r.payload?.lastVisitDate || null,
+              month_text: r.month_text || r.month || r.payload?.month || null,
+              updated_at: r.updated_at || new Date().toISOString()
+            };
+            const idx = mockStore.data_records.findIndex(x => x.collection === coll && String(x.id) === String(rec.id));
+            if (idx >= 0) mockStore.data_records[idx] = { ...mockStore.data_records[idx], ...rec };
+            else mockStore.data_records.push(rec);
           });
           return { data: rows, count: rows.length, error: null };
         }

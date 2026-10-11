@@ -34,6 +34,9 @@ module.exports = async function handler(req, res) {
         const count = (!error && Array.isArray(data)) ? data.length : 0;
         deleted[collection] = count;
         totalDeleted += count;
+        try {
+          await admin.from(collection).delete().neq('id', '___non_existent___');
+        } catch (_e) { /* fallback if table not created */ }
       } catch (_e) {
         deleted[collection] = 0;
       }

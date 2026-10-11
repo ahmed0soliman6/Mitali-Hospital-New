@@ -175,6 +175,31 @@
   function clean(value) { if (Array.isArray(value)) return value.map(clean); if (!value || typeof value !== "object") return value; return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined).map(([k, v]) => [k, clean(v)])); }
   function safeRecord(record) { const out = clean({ ...(record || {}) }); delete out.password; delete out.passwordHash; return out; }
   function rowFromRecord(collection, record) { const payload = safeRecord(record); const date = String(payload.date || payload.lastVisitDate || ""), month = String(payload.month || (date.match(/^\d{4}-\d{2}/) || [""])[0] || ""); return { collection, id: String(payload.id), payload, date_text: date || null, month_text: month || null, updated_at: String(payload.updatedAt || payload.createdAt || new Date().toISOString()) }; }
+  function explicitRowFromRecord(collection, record) {
+    const payload = safeRecord(record);
+    const date = String(payload.date || payload.lastVisitDate || ""), month = String(payload.month || (date.match(/^\d{4}-\d{2}/) || [""])[0] || "");
+    return {
+      id: String(payload.id),
+      date: date || null,
+      month: month || null,
+      file_no: payload.fileNo || null,
+      patient: payload.patient || payload.name || null,
+      phone: payload.phone || null,
+      doctor_id: payload.doctorId || payload.docId || null,
+      doctor_name: payload.doctorName || null,
+      exam_type: payload.examType || payload.type || null,
+      services: Array.isArray(payload.services) ? payload.services : [],
+      total: Number(payload.total || payload.amount || 0),
+      paid: Number(payload.paid || payload.paidAmount || 0),
+      payment_method: payload.paymentMethod || null,
+      status: payload.status || null,
+      notes: payload.notes || null,
+      linked_income_id: payload.linkedIncomeId || null,
+      next_visit_date: payload.nextVisitDate || null,
+      payload,
+      updated_at: String(payload.updatedAt || payload.createdAt || new Date().toISOString())
+    };
+  }
   function record(row) { return { id: row.id, ...(row.payload || {}) }; }
   function metric(key, count) { READ_METRICS.queries++; READ_METRICS.documents += Number(count || 0); READ_METRICS.byKey[key] = (READ_METRICS.byKey[key] || 0) + Number(count || 0); READ_METRICS.lastReadAt = new Date().toISOString(); }
   function apiUrl(path) { return API_BASE + path; }
@@ -331,6 +356,12 @@
           console.error("Supabase upsertRecords error for " + col + ":", error);
           throw Object.assign(new Error(error.message || "Supabase upsert failed"), { code: error.code, details: error.details, table: col });
         }
+        if (TABLES.has(col)) {
+          try {
+            const expChunk = chunk.map(r => explicitRowFromRecord(col, r.payload));
+            await client.from(col).upsert(expChunk, { onConflict: "id" });
+          } catch (_e) { /* fallback if table not created yet */ }
+        }
       }
       return;
     }
@@ -361,6 +392,11 @@
         if (error) {
           console.error("Supabase deleteRecords error for " + col + ":", error);
           throw Object.assign(new Error(error.message || "Supabase delete failed"), { code: error.code, details: error.details, table: col });
+        }
+        if (TABLES.has(col)) {
+          try {
+            await client.from(col).delete().in("id", chunk);
+          } catch (_e) { /* fallback */ }
         }
       }
       return;
