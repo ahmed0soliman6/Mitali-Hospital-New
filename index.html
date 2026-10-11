@@ -2660,6 +2660,18 @@ function visitRemaining(v) {
             ? (Number(v.cost) || 0)
             : (Number(v.amount) || 0)))));
 
+  const cleanStatus = String(v.status || "").replace(/\s+/g, "").trim().toLowerCase();
+  const isUnpaidStatus = [
+    "unpaid",
+    "غيرمدفوع",
+    "متبقي",
+    "آجل",
+    "مؤجل",
+    "معلق",
+    "pending",
+    "deferred"
+  ].includes(cleanStatus);
+
   let paid;
   if (v.paid !== undefined && v.paid !== null) {
     paid = Number(v.paid) || 0;
@@ -2667,7 +2679,7 @@ function visitRemaining(v) {
     paid = Number(v.paidAmount) || 0;
   } else if (v.paid_amount !== undefined && v.paid_amount !== null) {
     paid = Number(v.paid_amount) || 0;
-  } else if (v.status === "unpaid" || v.status === "غير مدفوع" || v.status === "متبقي" || v.status === "آجل") {
+  } else if (isUnpaidStatus) {
     paid = 0;
   } else if (v.total !== undefined || v.totalAmount !== undefined || v.total_amount !== undefined || v.price !== undefined) {
     paid = v.amount !== undefined ? (Number(v.amount) || 0) : 0;

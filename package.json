@@ -36,6 +36,7 @@
     "test:dashboard-no-visits": "node tools/dashboard-no-visits-test.js",
     "test:exact-visits": "node tools/exact-visits-test.js",
     "test:visit-double-save-lock": "node tools/visit-double-save-lock-test.js",
+    "test:legacy-deferred": "node tools/legacy-deferred-status-test.js",
     "test:ledger-visibility-runtime": "node tools/ledger-visibility-test.js",
     "test:ledger-visibility": "node tools/financial-ledger-runtime-test.js",
     "test:visit-income-reconciliation": "node tools/financial-ledger-runtime-test.js",
@@ -44,7 +45,7 @@
     "desktop:start": "electron .",
     "desktop:dist": "electron-builder --win nsis --x64 --publish never",
     "desktop:publish": "electron-builder --win nsis --x64 --publish always",
-    "test": "npm run check && npm run test:acceptance && npm run test:income-form && npm run test:doctor-payroll && npm run test:accounting-consistency && npm run test:doctor-departments && npm run test:visit-window-size"
+    "test": "npm run check && npm run test:acceptance && npm run test:income-form && npm run test:doctor-payroll && npm run test:accounting-consistency && npm run test:doctor-departments && npm run test:visit-window-size && npm run test:legacy-deferred"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.0",
