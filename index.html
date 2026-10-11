@@ -773,7 +773,7 @@ const LOCAL_DATA_KEYS_TO_CLEAR = [
 ];
 const CLOUD_BUSINESS_KEYS_TO_CLEAR = [
   "visitsClinic", "visitsDental", "visitsOperations", "visitsLabs", "visitsRadiology", "income", "expense",
-  "labExpenses",
+  "labExpenses", "patientFilesClinic", "patientFilesDental", "patientFileIndexClinic", "patientFileIndexDental", "auditLog"
 ];
 const DEFAULT_SETTINGS_AFTER_WIPE = {
   openingBalance: 0,
@@ -7719,6 +7719,16 @@ function renderSettings() {
     try {
       const result = await window.MitaliSupabase.adminWipeBusinessData(typed);
       await clearLocalHospitalData({ scope: "business", wipeMarker: result.wipeId });
+      CLOUD_BUSINESS_KEYS_TO_CLEAR.forEach(k => { if (Array.isArray(DB[k])) DB[k] = []; });
+      PATIENT_FILE_PAGE_STATE.patientFilesClinic.pages = {};
+      PATIENT_FILE_PAGE_STATE.patientFilesDental.pages = {};
+      PATIENT_FILE_VISITS_CACHE.patientFilesClinic = {};
+      PATIENT_FILE_VISITS_CACHE.patientFilesDental = {};
+      for (const k of Object.keys(FIRESTORE_PAGE_STATE)) delete FIRESTORE_PAGE_STATE[k];
+      for (const k of Object.keys(PAGE_DATA_LOADED_AT)) delete PAGE_DATA_LOADED_AT[k];
+      PAGE_DATA_LOADING.clear();
+      clearExactVisits();
+      DATA_VERSION++;
       showToast(`تم حذف ${fmtInt(result.totalDeleted || 0)} سجل من ملفات المرضى والوارد والمنصرف. الأطباء والموظفون والإعدادات محفوظة.`, 7000);
       route();
     } catch (error) {

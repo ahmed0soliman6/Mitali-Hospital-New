@@ -96,6 +96,7 @@ module.exports = async function handler(req, res) {
       }
       return json(res, 200, { ok: true, deleted: { id: uid } });
     }
+    if (input.action === 'wipeBusinessData') return require('./data')(req, res);
     if (['update','resetPassword','toggleStatus','permissions'].includes(input.action)) return json(res, 200, { ok: true, account: await update(admin, input) });
     throw Object.assign(new Error('unknown-action'), { status: 400 });
   } catch (e) {

@@ -656,7 +656,7 @@
   const adminDeleteAccount = uid => adminRequest({ action: "delete", uid });
   const configureManagerRecovery = payload => adminRequest({ action: "configureManagerRecovery", ...payload });
   const recoverManagerPassword = payload => fetchJson("/api/admin/account", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "recoverManagerPassword", ...payload }) });
-  const adminWipeBusinessData = confirmationText => adminRequest({ action: "wipeBusinessData", confirmationText });
+  const adminWipeBusinessData = async confirmationText => fetchJson("/api/admin/data", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${await accessToken()}` }, body: JSON.stringify({ action: "wipeBusinessData", confirmationText }) });
   const adminAccountRequest = adminRequest;
   const isMockMode = () => !config();
   window.getPatientIndexPage = getPatientIndexPage; window.searchPatientIndex = searchPatientIndex; window.savePatientToIndex = savePatientToIndex; window.getPatientVisits = getPatientVisits; window.syncPatientIndexes = syncPatientIndexes;
