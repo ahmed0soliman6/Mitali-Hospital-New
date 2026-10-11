@@ -200,7 +200,30 @@
       updated_at: String(payload.updatedAt || payload.createdAt || new Date().toISOString())
     };
   }
-  function record(row) { return { id: row.id, ...(row.payload || {}) }; }
+  function record(row) {
+    if (!row) return {};
+    const payload = row.payload || {};
+    return {
+      ...payload,
+      id: String(row.id || payload.id || ""),
+      date: row.date || payload.date || payload.lastVisitDate || "",
+      month: row.month || payload.month || "",
+      fileNo: row.file_no || payload.fileNo || "",
+      patient: row.patient || payload.patient || payload.name || "",
+      phone: row.phone || payload.phone || "",
+      doctorId: row.doctor_id || payload.doctorId || payload.docId || "",
+      doctorName: row.doctor_name || payload.doctorName || "",
+      examType: row.exam_type || payload.examType || payload.type || "",
+      services: row.services || payload.services || [],
+      total: row.total !== undefined && row.total !== null && row.total !== "" ? Number(row.total) : (payload.total !== undefined ? Number(payload.total) : Number(payload.amount || 0)),
+      paid: row.paid !== undefined && row.paid !== null && row.paid !== "" ? Number(row.paid) : (payload.paid !== undefined ? Number(payload.paid) : Number(payload.paidAmount || 0)),
+      paymentMethod: row.payment_method || payload.paymentMethod || "",
+      status: row.status || payload.status || "",
+      notes: row.notes || payload.notes || "",
+      linkedIncomeId: row.linked_income_id || payload.linkedIncomeId || "",
+      nextVisitDate: row.next_visit_date || payload.nextVisitDate || ""
+    };
+  }
   function metric(key, count) { READ_METRICS.queries++; READ_METRICS.documents += Number(count || 0); READ_METRICS.byKey[key] = (READ_METRICS.byKey[key] || 0) + Number(count || 0); READ_METRICS.lastReadAt = new Date().toISOString(); }
   function apiUrl(path) { return API_BASE + path; }
   async function accessToken() {
@@ -267,14 +290,17 @@
       let from = 0;
       const batchSize = 1000;
       while (true) {
-        const { data, error } = await client.from("data_records").select("id,payload").eq("collection", col).order("updated_at", { ascending: false }).range(from, from + batchSize - 1);
-        if (error) {
-          console.error("Supabase getTable error for " + col + ":", error);
-          throw Object.assign(new Error(error.message || "Supabase getTable failed"), { code: error.code, table: col });
+        let res = await client.from(col).select("*").order("updated_at", { ascending: false }).range(from, from + batchSize - 1);
+        if (res.error) {
+          res = await client.from("data_records").select("id,payload").eq("collection", col).order("updated_at", { ascending: false }).range(from, from + batchSize - 1);
         }
-        if (Array.isArray(data)) {
-          allData = allData.concat(data);
-          if (data.length < batchSize) break;
+        if (res.error) {
+          console.error("Supabase getTable error for " + col + ":", res.error);
+          throw Object.assign(new Error(res.error.message || "Supabase getTable failed"), { code: res.error.code, table: col });
+        }
+        if (Array.isArray(res.data)) {
+          allData = allData.concat(res.data);
+          if (res.data.length < batchSize) break;
           from += batchSize;
         } else {
           break;
@@ -290,16 +316,28 @@
     metric(key, rows.length);
     return rows.map(record);
   }
-  function applyWhere(q, filters) { for (const f of (Array.isArray(filters) ? filters : filters ? [filters] : [])) { if (!f?.field || f.value === undefined) continue; const field = f.field === "date" ? "date_text" : f.field === "month" ? "month_text" : `payload->>${f.field}`; if (f.op === "==") q = q.eq(field, String(f.value)); else if (f.op === ">=") q = q.gte(field, String(f.value)); else if (f.op === "<=") q = q.lte(field, String(f.value)); else if (f.op === ">") q = q.gt(field, String(f.value)); else if (f.op === "<") q = q.lt(field, String(f.value)); } return q; }
+  function applyWhere(q, filters, isExplicit = false) {
+    for (const f of (Array.isArray(filters) ? filters : filters ? [filters] : [])) {
+      if (!f?.field || f.value === undefined) continue;
+      const colField = f.field === "date" ? "date" : f.field === "month" ? "month" : f.field === "patient" ? "patient" : f.field === "fileNo" ? "file_no" : f.field;
+      const field = isExplicit ? colField : (f.field === "date" ? "date_text" : f.field === "month" ? "month_text" : `payload->>${f.field}`);
+      if (f.op === "==") q = q.eq(field, String(f.value));
+      else if (f.op === ">=") q = q.gte(field, String(f.value));
+      else if (f.op === "<=") q = q.lte(field, String(f.value));
+      else if (f.op === ">") q = q.gt(field, String(f.value));
+      else if (f.op === "<") q = q.lt(field, String(f.value));
+    }
+    return q;
+  }
   async function getPage(key, options = {}) {
     await ready();
     const collection = collectionName(key), pageSize = Math.min(Math.max(Number(options.pageSize) || 30, 1), 100);
     const targetPage = Math.max(Number(options.page) || 1, 1);
     const c = config();
     if (c) {
-      let q = client.from("data_records").select("id,payload,date_text,month_text,updated_at").eq("collection", collection);
-      q = applyWhere(q, options.where);
-      const order = options.orderField === "month" ? "month_text" : options.orderField === "updatedAt" ? "updated_at" : "date_text";
+      let q = client.from(collection).select("*");
+      q = applyWhere(q, options.where, true);
+      const order = options.orderField === "month" ? "month" : options.orderField === "updatedAt" ? "updated_at" : "date";
       q = q.order(order, { ascending: false, nullsFirst: false }).order("updated_at", { ascending: false }).order("id", { ascending: false });
       if (options.cursor && options.cursor.primaryValue !== undefined && options.cursor.documentId && !options.page) {
         const pv = String(options.cursor.primaryValue);
@@ -309,7 +347,20 @@
         const from = (targetPage - 1) * pageSize;
         q = q.range(from, from + pageSize - 1);
       }
-      const { data, error } = await q;
+      let { data, error } = await q;
+      if (error) {
+        let legacyQ = client.from("data_records").select("id,payload,date_text,month_text,updated_at").eq("collection", collection);
+        legacyQ = applyWhere(legacyQ, options.where, false);
+        const legOrder = options.orderField === "month" ? "month_text" : options.orderField === "updatedAt" ? "updated_at" : "date_text";
+        legacyQ = legacyQ.order(legOrder, { ascending: false, nullsFirst: false }).order("updated_at", { ascending: false }).order("id", { ascending: false });
+        const from = (targetPage - 1) * pageSize;
+        legacyQ = legacyQ.range(from, from + pageSize - 1);
+        const legRes = await legacyQ;
+        if (!legRes.error) {
+          data = legRes.data;
+          error = null;
+        }
+      }
       if (error) {
         console.error("Supabase getPage error for " + collection + ":", error);
         throw Object.assign(new Error(error.message || "Supabase getPage failed"), { code: error.code, table: collection });
@@ -317,7 +368,7 @@
       if (Array.isArray(data)) {
         metric(key, data.length);
         const records = data.map(record), last = data[data.length - 1];
-        return { records, pageSize, hasMore: data.length === pageSize, nextCursor: last ? { primaryValue: last[order], documentId: last.id } : null };
+        return { records, pageSize, hasMore: data.length === pageSize, nextCursor: last ? { primaryValue: last[order] || last["date_text"] || "", documentId: last.id } : null };
       }
     }
     if (window.MITALI_IS_PROD) {
@@ -343,24 +394,29 @@
   async function getValue(key, fallback) { const rows = await getTable(key); if (!rows.length) return fallback; if (["settings", "categories"].includes(key)) return rows[0]; if (key === "specialties") return Array.isArray(rows[0].value) ? rows[0].value : fallback; return rows; }
   async function upsertRecords(key, records) {
     await ready();
-    const rows = records.filter(r => r?.id).map(r => rowFromRecord(collectionName(key), r));
-    if (!rows.length) return;
+    const validRecs = (records || []).filter(r => r?.id);
+    if (!validRecs.length) return;
+    const col = collectionName(key);
     const c = config();
     if (c) {
-      const col = collectionName(key);
+      const expRows = validRecs.map(r => explicitRowFromRecord(col, r));
       const chunkSize = 100;
-      for (let i = 0; i < rows.length; i += chunkSize) {
-        const chunk = rows.slice(i, i + chunkSize);
-        const { error } = await client.from("data_records").upsert(chunk, { onConflict: "collection,id" });
-        if (error) {
-          console.error("Supabase upsertRecords error for " + col + ":", error);
-          throw Object.assign(new Error(error.message || "Supabase upsert failed"), { code: error.code, details: error.details, table: col });
-        }
-        if (TABLES.has(col)) {
+      for (let i = 0; i < expRows.length; i += chunkSize) {
+        const expChunk = expRows.slice(i, i + chunkSize);
+        const { error: expErr } = await client.from(col).upsert(expChunk, { onConflict: "id" });
+        if (expErr) {
+          console.warn(`Supabase upsert explicitly to ${col} warning/retry:`, expErr.message);
+          const legacyRows = validRecs.slice(i, i + chunkSize).map(r => rowFromRecord(col, r));
+          const { error: legErr } = await client.from("data_records").upsert(legacyRows, { onConflict: "collection,id" });
+          if (legErr) {
+            console.error("Supabase upsertRecords error for " + col + ":", expErr || legErr);
+            throw Object.assign(new Error(expErr.message || legErr.message || "Supabase upsert failed"), { code: expErr.code || legErr.code, table: col });
+          }
+        } else {
           try {
-            const expChunk = chunk.map(r => explicitRowFromRecord(col, r.payload));
-            await client.from(col).upsert(expChunk, { onConflict: "id" });
-          } catch (_e) { /* fallback if table not created yet */ }
+            const legacyChunk = validRecs.slice(i, i + chunkSize).map(r => rowFromRecord(col, r));
+            await client.from("data_records").upsert(legacyChunk, { onConflict: "collection,id" });
+          } catch (_e) { /* ignore if data_records doesn't exist */ }
         }
       }
       return;
@@ -369,7 +425,8 @@
       throw new Error("Supabase is not configured in production");
     }
     const all = readMockRows();
-    rows.forEach(item => {
+    const legacyRows = validRecs.map(r => rowFromRecord(col, r));
+    legacyRows.forEach(item => {
       const idx = all.findIndex(r => r.collection === item.collection && String(r.id) === String(item.id));
       if (idx >= 0) all[idx] = { ...all[idx], ...item };
       else all.push({ ...item });
@@ -388,15 +445,15 @@
       const chunkSize = 100;
       for (let i = 0; i < idsArr.length; i += chunkSize) {
         const chunk = idsArr.slice(i, i + chunkSize);
-        const { error } = await client.from("data_records").delete().eq("collection", col).in("id", chunk);
-        if (error) {
-          console.error("Supabase deleteRecords error for " + col + ":", error);
-          throw Object.assign(new Error(error.message || "Supabase delete failed"), { code: error.code, details: error.details, table: col });
-        }
-        if (TABLES.has(col)) {
-          try {
-            await client.from(col).delete().in("id", chunk);
-          } catch (_e) { /* fallback */ }
+        const { error: expErr } = await client.from(col).delete().in("id", chunk);
+        if (expErr) {
+          const { error: legErr } = await client.from("data_records").delete().eq("collection", col).in("id", chunk);
+          if (legErr && expErr) {
+            console.error("Supabase deleteRecords error for " + col + ":", expErr);
+            throw Object.assign(new Error(expErr.message || legErr.message || "Supabase delete failed"), { code: expErr.code || legErr.code, table: col });
+          }
+        } else {
+          try { await client.from("data_records").delete().eq("collection", col).in("id", chunk); } catch (_e) {}
         }
       }
       return;
@@ -408,7 +465,23 @@
     writeMockRows(all);
   }
   async function setValue(key, value) { return upsertRecord(key, { id: "app", ...(Array.isArray(value) && key === "specialties" ? { value } : value || {}) }); }
-  async function setTable(key, records) { await ready(); const collection = collectionName(key), keep = records.map(r => String(r.id)); try { let q = client.from("data_records").delete().eq("collection", collection); if (keep.length) q = q.not("id", "in", `(${keep.join(",")})`); await q; } catch (_e) {} await upsertRecords(key, records); return records; }
+  async function setTable(key, records) {
+    await ready();
+    const collection = collectionName(key), keep = records.map(r => String(r.id));
+    try {
+      let q = client.from(collection).delete();
+      if (keep.length) q = q.not("id", "in", `(${keep.join(",")})`);
+      await q;
+    } catch (_e) {
+      try {
+        let q = client.from("data_records").delete().eq("collection", collection);
+        if (keep.length) q = q.not("id", "in", `(${keep.join(",")})`);
+        await q;
+      } catch (_err) {}
+    }
+    await upsertRecords(key, records);
+    return records;
+  }
   function subscribe(key, onChange, onError) {
     try {
       init();
@@ -438,15 +511,15 @@
       try {
         const queries = [];
         if (/^\d+$/.test(t)) {
-          queries.push(client.from("data_records").select("id,payload,date_text,updated_at").eq("collection", collection).eq("payload->>fileNo", t).limit(30));
+          queries.push(client.from(collection).select("*").eq("file_no", t).limit(30));
         }
         if (/^[0-9+\-\s]+$/.test(t) && t.length >= 3) {
-          queries.push(client.from("data_records").select("id,payload,date_text,updated_at").eq("collection", collection).ilike("payload->>phone", `%${t}%`).limit(30));
+          queries.push(client.from(collection).select("*").ilike("phone", `%${t}%`).limit(30));
         }
-        queries.push(client.from("data_records").select("id,payload,date_text,updated_at").eq("collection", collection).ilike("payload->>name", `%${t}%`).limit(30));
+        queries.push(client.from(collection).select("*").ilike("patient", `%${t}%`).limit(30));
         const alt = t.startsWith("ا") ? "أ" + t.slice(1) : t.startsWith("أ") ? "ا" + t.slice(1) : null;
         if (alt) {
-          queries.push(client.from("data_records").select("id,payload,date_text,updated_at").eq("collection", collection).ilike("payload->>name", `%${alt}%`).limit(30));
+          queries.push(client.from(collection).select("*").ilike("patient", `%${alt}%`).limit(30));
         }
         const snaps = await Promise.all(queries);
         const map = new Map();
@@ -465,7 +538,25 @@
             return db.localeCompare(da);
           });
         }
-      } catch (_e) {}
+      } catch (_e) {
+        // Fallback to legacy data_records query
+        try {
+          const legQueries = [];
+          if (/^\d+$/.test(t)) legQueries.push(client.from("data_records").select("id,payload,date_text,updated_at").eq("collection", collection).eq("payload->>fileNo", t).limit(30));
+          if (/^[0-9+\-\s]+$/.test(t) && t.length >= 3) legQueries.push(client.from("data_records").select("id,payload,date_text,updated_at").eq("collection", collection).ilike("payload->>phone", `%${t}%`).limit(30));
+          legQueries.push(client.from("data_records").select("id,payload,date_text,updated_at").eq("collection", collection).ilike("payload->>name", `%${t}%`).limit(30));
+          const snaps = await Promise.all(legQueries);
+          const map = new Map();
+          for (const snap of snaps) {
+            if (snap.data && Array.isArray(snap.data)) {
+              for (const row of snap.data) {
+                if (!map.has(row.id)) map.set(row.id, record(row));
+              }
+            }
+          }
+          if (map.size) return Array.from(map.values());
+        } catch (_err) {}
+      }
     }
     const rows = readMockRows().filter(r => r.collection === collection && String(r.payload?.name || "").toLowerCase().includes(t.toLowerCase())).slice(0, 30);
     metric(pageKey, rows.length);
@@ -486,8 +577,12 @@
     const c = config();
     if (c) {
       try {
-        const { data } = await client.from("data_records").select("id,payload").eq("collection", collName).eq("id", id).maybeSingle();
-        if (data?.payload) existing = data.payload;
+        const { data } = await client.from(collName).select("*").eq("id", id).maybeSingle();
+        if (data) existing = record(data);
+        else {
+          const resLeg = await client.from("data_records").select("id,payload").eq("collection", collName).eq("id", id).maybeSingle();
+          if (resLeg.data?.payload) existing = resLeg.data.payload;
+        }
       } catch (_e) {}
     }
 
@@ -537,15 +632,15 @@
       try {
         const queries = [];
         if (fileNo) {
-          queries.push(client.from("data_records").select("id,payload,date_text,created_at").eq("collection", coll).eq("payload->>fileNo", fileNo));
+          queries.push(client.from(coll).select("*").eq("file_no", fileNo));
         }
         if (phone && phone.length >= 4) {
-          queries.push(client.from("data_records").select("id,payload,date_text,created_at").eq("collection", coll).eq("payload->>phone", phone));
+          queries.push(client.from(coll).select("*").eq("phone", phone));
         }
         if (name) {
-          queries.push(client.from("data_records").select("id,payload,date_text,created_at").eq("collection", coll).ilike("payload->>patient", `%${name}%`));
+          queries.push(client.from(coll).select("*").ilike("patient", `%${name}%`));
           const alt = name.startsWith("ا") ? "أ" + name.slice(1) : name.startsWith("أ") ? "ا" + name.slice(1) : null;
-          if (alt) queries.push(client.from("data_records").select("id,payload,date_text,created_at").eq("collection", coll).ilike("payload->>patient", `%${alt}%`));
+          if (alt) queries.push(client.from(coll).select("*").ilike("patient", `%${alt}%`));
         }
         if (queries.length) {
           const snaps = await Promise.all(queries);
@@ -584,21 +679,24 @@
       let allVisits = [];
       let from = 0;
       while (true) {
-        const { data, error } = await client.from("data_records").select("id,payload,date_text,created_at").eq("collection", t.visitColl).range(from, from + 999);
-        if (error || !data) break;
-        allVisits = allVisits.concat(data);
-        if (data.length < 1000) break;
+        let res = await client.from(t.visitColl).select("*").range(from, from + 999);
+        if (res.error || !res.data) {
+          res = await client.from("data_records").select("id,payload,date_text,created_at").eq("collection", t.visitColl).range(from, from + 999);
+        }
+        if (res.error || !res.data) break;
+        allVisits = allVisits.concat(res.data);
+        if (res.data.length < 1000) break;
         from += 1000;
       }
       const indexMap = new Map();
       for (const row of allVisits) {
-        const v = row.payload || {};
+        const v = record(row);
         const rawName = String(v.patient || v.patientName || v.name || v.patient_name || "").replace(/\s+/g, " ").trim();
         const phone = String(v.phone ?? v.mobile ?? "").trim();
         const fileNo = String(v.fileNo ?? v.file_no ?? "").trim();
         if (!rawName && !phone && !fileNo) continue;
         const id = (fileNo ? `F:${fileNo}` : `N:${rawName.toLowerCase()}|${phone}`).replace(/\//g, "_").slice(0, 120);
-        const visitDate = v.date || row.date_text || (row.created_at ? row.created_at.slice(0, 10) : "");
+        const visitDate = v.date || row.date || row.date_text || (row.created_at ? row.created_at.slice(0, 10) : "");
         const createdAt = v.createdAt || row.created_at || new Date().toISOString();
         const legacyAmount = Number(v.amount) || 0;
         const total = (v.total !== undefined && v.total !== null) ? (Number(v.total) || 0) : legacyAmount;
@@ -634,19 +732,9 @@
           if (!existing.fileNo && fileNo) existing.fileNo = fileNo;
         }
       }
-      const rows = Array.from(indexMap.values()).map(p => ({
-        collection: t.indexColl,
-        id: p.id,
-        payload: p,
-        date_text: p.lastVisitDate || null,
-        month_text: p.lastVisitDate ? p.lastVisitDate.slice(0, 7) : null,
-        updated_at: p.lastVisitCreatedAt || p.updatedAt || new Date().toISOString()
-      }));
-      for (let i = 0; i < rows.length; i += 200) {
-        const chunk = rows.slice(i, i + 200);
-        await client.from("data_records").upsert(chunk, { onConflict: "collection,id" });
-      }
-      counts[t.indexColl] = rows.length;
+      const indexRecords = Array.from(indexMap.values());
+      await upsertRecords(t.indexColl, indexRecords);
+      counts[t.indexColl] = indexRecords.length;
     }
     return counts;
   }

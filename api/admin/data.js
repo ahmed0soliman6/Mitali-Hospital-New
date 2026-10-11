@@ -30,13 +30,21 @@ module.exports = async function handler(req, res) {
     let totalDeleted = 0;
     for (const collection of COLLECTIONS) {
       try {
-        const { data, error } = await admin.from('data_records').delete().eq('collection', collection).select('id');
-        const count = (!error && Array.isArray(data)) ? data.length : 0;
+        let count = 0;
+        const { data, error } = await admin.from(collection).delete().neq('id', '___non_existent___').select('id');
+        if (!error && Array.isArray(data)) {
+          count = data.length;
+        } else {
+          try {
+            const legRes = await admin.from('data_records').delete().eq('collection', collection).select('id');
+            if (!legRes.error && Array.isArray(legRes.data)) count = legRes.data.length;
+          } catch (_e) {}
+        }
         deleted[collection] = count;
         totalDeleted += count;
         try {
-          await admin.from(collection).delete().neq('id', '___non_existent___');
-        } catch (_e) { /* fallback if table not created */ }
+          await admin.from('data_records').delete().eq('collection', collection);
+        } catch (_e) {}
       } catch (_e) {
         deleted[collection] = 0;
       }

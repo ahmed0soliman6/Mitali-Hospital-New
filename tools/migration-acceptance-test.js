@@ -111,19 +111,17 @@ async function runTests() {
 
     // Allowed: read clinic visit
     const { data: clinicRead, error: clinicErr } = await empClient
-      .from('data_records')
+      .from('visits_clinic')
       .select('*')
-      .eq('collection', 'visits_clinic')
       .limit(1);
     assert(7, 'إعطاء الموظف صلاحية العيادات والوصول إليها', !clinicErr, clinicErr?.message);
 
     // Forbidden: insert dental visit
     const { data: dentalWrite, error: dentalErr } = await empClient
-      .from('data_records')
+      .from('visits_dental')
       .insert({
-        collection: 'visits_dental',
         id: `test-forbidden-${Date.now()}`,
-        payload: { patient: 'Forbidden' }
+        patient: 'Forbidden'
       });
     assert(8, 'منع الموظف من الوصول أو الإضافة لأقسام غير مصرح بها (Dental/Labs)', !!dentalErr, dentalErr ? 'ممنوع بـ RLS بنجاح' : 'تم السماح بالخطأ!');
     assert(27, 'اختبار فشل RLS عند غياب الصلاحية (RLS enforcement)', !!dentalErr);
@@ -143,7 +141,7 @@ async function runTests() {
     assert(4, 'رفض مستخدم موقوف', false, e.message);
   }
 
-  // 7. Register clinic visit, verify in data_records and income
+  // 7. Register clinic visit, verify in explicit visits_clinic and income tables
   const testVisitId = `vis-acc-${Date.now()}`;
   const testDate = new Date().toISOString().slice(0, 10);
   const testMonth = testDate.slice(0, 7);
@@ -152,11 +150,17 @@ async function runTests() {
 
   try {
     // Insert clinic visit
-    const { error: insErr } = await adminClient.from('data_records').insert({
-      collection: 'visits_clinic',
+    const { error: insErr } = await adminClient.from('visits_clinic').insert({
       id: testVisitId,
-      date_text: testDate,
-      month_text: testMonth,
+      date: testDate,
+      month: testMonth,
+      patient: 'سعيد عبد الله',
+      phone: '01012345678',
+      file_no: '9901',
+      total: testPaidAmount,
+      paid: testPaidAmount,
+      status: 'تم',
+      linked_income_id: testIncomeId,
       payload: {
         id: testVisitId,
         patient: 'سعيد عبد الله',
@@ -172,22 +176,24 @@ async function runTests() {
     if (insErr) throw insErr;
     assert(9, 'تسجيل زيارة عيادات (Register clinic visit)', true);
 
-    // Verify in data_records
+    // Verify in visits_clinic
     const { data: fetchVis, error: fetchErr } = await adminClient
-      .from('data_records')
+      .from('visits_clinic')
       .select('*')
-      .eq('collection', 'visits_clinic')
       .eq('id', testVisitId)
       .single();
-    assert(10, 'ظهور الزيارة في data_records (Verify in data_records)', !fetchErr && fetchVis?.id === testVisitId);
-    assert(11, 'ظهورها في صفحة اليومية وبيانات السجل (Clinic diary fields)', fetchVis?.payload?.patient === 'سعيد عبد الله');
+    assert(10, 'ظهور الزيارة في visits_clinic (Verify in explicit visits_clinic table)', !fetchErr && fetchVis?.id === testVisitId);
+    assert(11, 'ظهورها في صفحة اليومية وبيانات السجل (Clinic diary fields)', (fetchVis?.patient || fetchVis?.payload?.patient) === 'سعيد عبد الله');
 
     // Insert linked income
-    const { error: incErr } = await adminClient.from('data_records').insert({
-      collection: 'income',
+    const { error: incErr } = await adminClient.from('income').insert({
       id: testIncomeId,
-      date_text: testDate,
-      month_text: testMonth,
+      date: testDate,
+      month: testMonth,
+      total: testPaidAmount,
+      paid: testPaidAmount,
+      patient: 'سعيد عبد الله',
+      notes: 'تم إنشاؤه تلقائيًا من سجل الزيارات',
       payload: {
         id: testIncomeId,
         date: testDate,
@@ -201,7 +207,7 @@ async function runTests() {
     assert(12, 'ظهور قيد الزيارة في الوارد بدون تكرار (Verify in income ledger)', !incErr);
   } catch (e) {
     assert(9, 'تسجيل زيارة عيادات', false, e.message);
-    assert(10, 'ظهور الزيارة في data_records', false, e.message);
+    assert(10, 'ظهور الزيارة في visits_clinic', false, e.message);
     assert(11, 'ظهورها في صفحة اليومية', false, e.message);
     assert(12, 'ظهور قيدها في الوارد', false, e.message);
   }
@@ -211,7 +217,7 @@ async function runTests() {
     const offlineItem = {
       collection: 'visits_clinic',
       id: `vis-offline-${Date.now()}`,
-      payload: { patient: 'أحمد محمود', paid: 100, date: testDate }
+      payload: { id: `vis-offline-${Date.now()}`, patient: 'أحمد محمود', paid: 100, date: testDate }
     };
     // Local outbox simulation: saving and then pushing to Supabase
     assert(13, 'تسجيل زيارة أثناء انقطاع الإنترنت (Offline visit creation contract)', true);
@@ -219,26 +225,30 @@ async function runTests() {
     assert(15, 'إدراج العملية في Outbox طابور الانتظار (Queued in Outbox)', true);
 
     // Online flush simulation:
-    const { error: flushErr } = await adminClient.from('data_records').upsert([{
-      collection: offlineItem.collection,
+    const { error: flushErr } = await adminClient.from('visits_clinic').upsert([{
       id: offlineItem.id,
-      date_text: testDate,
-      month_text: testMonth,
+      date: testDate,
+      month: testMonth,
+      patient: 'أحمد محمود',
+      paid: 100,
+      total: 100,
       payload: offlineItem.payload
-    }], { onConflict: 'collection,id' });
+    }], { onConflict: 'id' });
     assert(16, 'رفع العملية بعد عودة الإنترنت (Flush Outbox to Supabase)', !flushErr);
 
     // Duplicate retry attempt (idempotent upsert):
-    const { error: retryErr } = await adminClient.from('data_records').upsert([{
-      collection: offlineItem.collection,
+    const { error: retryErr } = await adminClient.from('visits_clinic').upsert([{
       id: offlineItem.id,
-      date_text: testDate,
-      month_text: testMonth,
+      date: testDate,
+      month: testMonth,
+      patient: 'أحمد محمود',
+      paid: 100,
+      total: 100,
       payload: offlineItem.payload
-    }], { onConflict: 'collection,id' });
-    const { count } = await adminClient.from('data_records').select('*', { count: 'exact', head: true }).eq('collection', 'visits_clinic').eq('id', offlineItem.id);
+    }], { onConflict: 'id' });
+    const { count } = await adminClient.from('visits_clinic').select('*', { count: 'exact', head: true }).eq('id', offlineItem.id);
     assert(17, 'عدم تكرار السجل بعد إعادة المحاولة (Idempotent upsert, count=1)', !retryErr && count === 1);
-    await adminClient.from('data_records').delete().eq('collection', 'visits_clinic').eq('id', offlineItem.id);
+    await adminClient.from('visits_clinic').delete().eq('id', offlineItem.id);
   } catch (e) {
     assert(16, 'رفع العملية بعد عودة الإنترنت', false, e.message);
     assert(17, 'عدم تكرار السجل', false, e.message);
@@ -248,17 +258,20 @@ async function runTests() {
   try {
     const newPaid = 350;
     // Update visit
-    await adminClient.from('data_records').update({
+    await adminClient.from('visits_clinic').update({
+      paid: newPaid, total: newPaid,
       payload: { id: testVisitId, patient: 'سعيد عبد الله', paid: newPaid, total: newPaid, date: testDate, linkedIncomeId: testIncomeId }
-    }).eq('collection', 'visits_clinic').eq('id', testVisitId);
+    }).eq('id', testVisitId);
     // Update income
-    await adminClient.from('data_records').update({
+    await adminClient.from('income').update({
+      paid: newPaid, total: newPaid,
       payload: { id: testIncomeId, amount: newPaid, date: testDate, category: 'عيادات', notes: 'تم إنشاؤه تلقائيًا من سجل الزيارات' }
-    }).eq('collection', 'income').eq('id', testIncomeId);
+    }).eq('id', testIncomeId);
 
-    const { data: updInc } = await adminClient.from('data_records').select('payload').eq('collection', 'income').eq('id', testIncomeId).single();
+    const { data: updInc } = await adminClient.from('income').select('payload, paid, total').eq('id', testIncomeId).single();
+    const resolvedAmt = updInc?.paid || updInc?.total || updInc?.payload?.amount || updInc?.payload?.paid;
     assert(18, 'تعديل مبلغ الزيارة (Edit visit amount)', true);
-    assert(19, 'تحديث قيد الوارد المرتبط بنفس المبلغ (Verify linked income amount = 350)', updInc?.payload?.amount === 350);
+    assert(19, 'تحديث قيد الوارد المرتبط بنفس المبلغ (Verify linked income amount = 350)', resolvedAmt === 350);
   } catch (e) {
     assert(18, 'تعديل مبلغ الزيارة', false, e.message);
     assert(19, 'تحديث قيد الوارد', false, e.message);
@@ -266,10 +279,10 @@ async function runTests() {
 
   // 10. Delete visit and verify tombstone / cloud removal (Tests 20-21)
   try {
-    await adminClient.from('data_records').delete().eq('collection', 'visits_clinic').eq('id', testVisitId);
-    await adminClient.from('data_records').delete().eq('collection', 'income').eq('id', testIncomeId);
+    await adminClient.from('visits_clinic').delete().eq('id', testVisitId);
+    await adminClient.from('income').delete().eq('id', testIncomeId);
 
-    const { data: checkDeleted } = await adminClient.from('data_records').select('id').eq('collection', 'visits_clinic').eq('id', testVisitId).maybeSingle();
+    const { data: checkDeleted } = await adminClient.from('visits_clinic').select('id').eq('id', testVisitId).maybeSingle();
     assert(20, 'حذف الزيارة وقيد الوارد (Delete visit & linked income)', checkDeleted === null);
     assert(21, 'التأكد من عدم عودة الزيارة بعد المزامنة (Tombstone removal confirmed)', checkDeleted === null);
   } catch (e) {
@@ -287,36 +300,38 @@ async function runTests() {
   ];
   try {
     for (const d of depts) {
-      await adminClient.from('data_records').upsert([{
-        collection: d.col,
+      await adminClient.from(d.col).upsert([{
         id: `dept-test-${d.col}`,
-        date_text: testDate,
-        month_text: testMonth,
+        date: testDate,
+        month: testMonth,
+        patient: `مريض ${d.name}`,
+        paid: 100,
+        total: 100,
         payload: { id: `dept-test-${d.col}`, patient: `مريض ${d.name}`, paid: 100, date: testDate }
-      }], { onConflict: 'collection,id' });
+      }], { onConflict: 'id' });
     }
     assert(22, 'تسجيل زيارة في كل قسم من الأقسام الخمسة (All 5 departments registered)', true);
 
     let allFound = true;
     for (const d of depts) {
-      const { data } = await adminClient.from('data_records').select('id').eq('collection', d.col).eq('id', `dept-test-${d.col}`).maybeSingle();
+      const { data } = await adminClient.from(d.col).select('id').eq('id', `dept-test-${d.col}`).maybeSingle();
       if (!data) allFound = false;
     }
-    assert(23, 'ظهور كل قسم في data_records (Verify all 5 in data_records)', allFound);
+    assert(23, 'ظهور كل قسم في الجداول الصريحة (Verify all 5 in explicit relational tables)', allFound);
     for (const d of depts) {
-      await adminClient.from('data_records').delete().eq('collection', d.col).eq('id', `dept-test-${d.col}`);
+      await adminClient.from(d.col).delete().eq('id', `dept-test-${d.col}`);
     }
   } catch (e) {
     assert(22, 'تسجيل في الأقسام الخمسة', false, e.message);
-    assert(23, 'ظهور الأقسام الخمسة في data_records', false, e.message);
+    assert(23, 'ظهور الأقسام الخمسة في الجداول الصريحة', false, e.message);
   }
 
   // 12. Pagination & Month filtering (Tests 24-25)
   try {
-    const { data: pageData } = await adminClient.from('data_records').select('*').limit(50);
+    const { data: pageData } = await adminClient.from('visits_clinic').select('*').limit(50);
     assert(24, 'اختبار pagination وحجم الصفحة القياسي 50 (Pagination test)', Array.isArray(pageData) && pageData.length <= 50);
 
-    const { data: monthData } = await adminClient.from('data_records').select('*').gte('date_text', `${testMonth}-01`).lte('date_text', `${testMonth}-31`);
+    const { data: monthData } = await adminClient.from('visits_clinic').select('*').gte('date', `${testMonth}-01`).lte('date', `${testMonth}-31`);
     assert(25, 'اختبار التصفية بالشهر الحالي (Current month date range test)', Array.isArray(monthData));
   } catch (e) {
     assert(24, 'اختبار pagination', false, e.message);
