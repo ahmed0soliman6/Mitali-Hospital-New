@@ -1703,6 +1703,19 @@ const PAGE_DATA_LOADING = new Map();
 const PAGE_DATA_LOADED_AT = Object.create(null);
 const FIRESTORE_PAGE_STATE = Object.create(null);
 const FIRESTORE_PAGE_ERRORS = Object.create(null);
+
+function invalidatePageState(key) {
+  if (!key) return;
+  delete FIRESTORE_PAGE_STATE[key];
+  delete PAGE_DATA_LOADED_AT[key];
+  delete FIRESTORE_PAGE_ERRORS[key];
+  if (typeof EXACT_VISIT_PAGES !== "undefined" && EXACT_VISIT_PAGES && EXACT_VISIT_PAGES[key]) {
+    delete EXACT_VISIT_PAGES[key];
+  }
+  if (typeof EXACT_VISIT_CACHE !== "undefined" && EXACT_VISIT_CACHE && EXACT_VISIT_CACHE[key]) {
+    delete EXACT_VISIT_CACHE[key];
+  }
+}
 const FINANCIAL_SUMMARY_CACHE = Object.create(null);
 const FINANCIAL_SUMMARY_LOADING = new Map();
 function cachedFinancialSummary(month = "all") {
@@ -4654,32 +4667,30 @@ function renderVisitsPage(kind) {
     // برسالة نهائية بعد اكتمال persist() الفعلي.
     state.editId = null;
     if (!editing) state.tablePage[`visits_${kind}`] = 1;
-    route();
+    const visitTableKey = isDental ? "visitsDental" : "visitsClinic";
+    invalidatePageState(visitTableKey);
+    invalidatePageState("income");
+    if (typeof SECTION_PATIENT_INDEX_CACHE !== "undefined") {
+      SECTION_PATIENT_INDEX_CACHE.clinic = null;
+      SECTION_PATIENT_INDEX_CACHE.dental = null;
+    }
     showToast(`💾 ${editing ? "تم تحديث السجل محليًا" : "تمت إضافة المعاملة محليًا"} — جارٍ المزامنة...`, 2400);
-    // إصلاح جوهري: ننتظر persist() فعليًا هنا (بدل إطلاقها بدون انتظار كما كان
 
-    // سابقًا) قبل استدعاء route(). هذا يضمن أن أى تحديث خلفى آخر (مثلًا
-    // backgroundRefreshCurrentPage أو سحب فورى بعد التنقل) لا يمكن أبدًا أن يبدأ ويقرأ
-    // نسخة سحابية لم تصل إليها هذه الزيارة بعد - وهو السبب الجذرى وراء اختفاء
-    // الزيارة الجديدة مؤقتًا. PENDING_WRITES (المُحدَّث داخل persist نفسها) يبقى
-    // > 0 طوال مدة هذا الانتظار، وهو ما يحمى منه backgroundRefreshCurrentPage أعلاه أيضًا.
     let pushFailedOnline = false;
     try {
       const incomeChanged = Number(rec.paid) > 0 || !!(editing && editing.linkedIncomeId);
       const writes = [
-        persist(isDental ? "visitsDental" : "visitsClinic"),
+        persist(visitTableKey),
         syncPatientIndexRecord(rec, kind)
       ];
       if (incomeChanged) writes.push(persist("income"));
       await Promise.all(writes);
     } catch (err) {
-      // فشل الرفع الفورى للسحابة رغم وجود اتصال (خطأ شبكة عابر، رفض من الخادم...).
-      // البيانات محفوظة محليًا بالفعل وأُضيفت لطابور إعادة المحاولة التلقائية
-      // (داخل storeSetInner)، فهذا ليس فشلًا حقيقيًا للعملية من منظور المستخدم -
-      // لا نُظهر رسالة خطأ عامة ولا نمنعه من المتابعة، فقط نوضّح أن الحفظ محلى الآن.
       console.error("Visit sync push failed (saved locally, will retry):", err);
       pushFailedOnline = true;
     }
+    invalidatePageState(visitTableKey);
+    invalidatePageState("income");
     if (pushFailedOnline) {
       showToast(`💾 ${editing ? "تم حفظ التعديل" : "تم تسجيل الزيارة"} محليًا — تعذّر رفعه للسحابة الآن وسيُعاد رفعه تلقائيًا عند توفر الاتصال`, 3800);
     } else {
@@ -5002,7 +5013,8 @@ function renderServiceVisitsPage(kind) {
       await syncVisitIncomeLink(rec, kind, true);
       state.editId = null;
       if (!editing) state.tablePage[`visits_${kind}`] = 1;
-      route();
+      invalidatePageState(cfg.listKey);
+      invalidatePageState("income");
       showToast(`💾 ${editing ? "تم تحديث السجل محليًا" : "تمت إضافة المعاملة محليًا"} — جارٍ المزامنة...`, 2400);
       let pushFailedOnline = false;
       try {
@@ -5014,6 +5026,8 @@ function renderServiceVisitsPage(kind) {
         console.error("Service visit sync push failed (saved locally, will retry):", err);
         pushFailedOnline = true;
       }
+      invalidatePageState(cfg.listKey);
+      invalidatePageState("income");
       if (pushFailedOnline) {
         showToast(`💾 ${editing ? "تم حفظ التعديل" : "تم التسجيل"} محليًا — تعذّر رفعه للسحابة الآن وسيُعاد رفعه تلقائيًا عند توفر الاتصال`, 3800);
       } else {
@@ -5734,15 +5748,44 @@ function outstandingPaginationHTML(pageKey, info) {
 }
 const SECTION_PATIENT_INDEX_CACHE = { clinic: null, dental: null };
 const SECTION_PATIENT_INDEX_LOADING = new Map();
+const SECTION_PATIENT_INDEX_ERRORS = { clinic: null, dental: null };
+
+function resolveSectionKey(sectionKey) {
+  if (!sectionKey) return "";
+  const aliases = {
+    outstandingBalancesClinic: "clinic",
+    outstandingBalancesDental: "dental",
+    outstandingBalancesOperations: "operations",
+    outstandingBalancesLabs: "labs",
+    outstandingBalancesRadiology: "radiology",
+    visitsClinic: "clinic",
+    visitsDental: "dental",
+    visitsOperations: "operations",
+    visitsLabs: "labs",
+    visitsRadiology: "radiology",
+    patientFilesClinic: "clinic",
+    patientFilesDental: "dental",
+    clinic: "clinic",
+    dental: "dental",
+    operations: "operations",
+    labs: "labs",
+    radiology: "radiology"
+  };
+  return aliases[sectionKey] || (typeof OUTSTANDING_PAGE_SECTION !== "undefined" && OUTSTANDING_PAGE_SECTION[sectionKey]) || sectionKey;
+}
 
 async function loadSectionPatientIndex(sectionKey) {
-  const normKey = OUTSTANDING_PAGE_SECTION[sectionKey] || sectionKey;
+  const normKey = resolveSectionKey(sectionKey);
   const meta = OUTSTANDING_SECTION_META[normKey];
   if (!meta || !meta.patientPage) return [];
   const cacheKey = normKey === "dental" ? "dental" : "clinic";
-  if (Array.isArray(SECTION_PATIENT_INDEX_CACHE[cacheKey])) return SECTION_PATIENT_INDEX_CACHE[cacheKey];
+  if (Array.isArray(SECTION_PATIENT_INDEX_CACHE[cacheKey])) {
+    SECTION_PATIENT_INDEX_ERRORS[cacheKey] = null;
+    return SECTION_PATIENT_INDEX_CACHE[cacheKey];
+  }
   if (Array.isArray(DB[meta.patientPage]) && DB[meta.patientPage].length) {
     SECTION_PATIENT_INDEX_CACHE[cacheKey] = DB[meta.patientPage];
+    SECTION_PATIENT_INDEX_ERRORS[cacheKey] = null;
     return SECTION_PATIENT_INDEX_CACHE[cacheKey];
   }
   const store = window.MitaliSupabase || window.MitaliFirebase;
@@ -5750,12 +5793,14 @@ async function loadSectionPatientIndex(sectionKey) {
     if (!SECTION_PATIENT_INDEX_LOADING.has(cacheKey)) {
       SECTION_PATIENT_INDEX_LOADING.set(cacheKey, store.getTable(meta.patientPage)
         .then(records => {
-          SECTION_PATIENT_INDEX_CACHE[cacheKey] = Array.isArray(records) ? records : [];
-          return SECTION_PATIENT_INDEX_CACHE[cacheKey];
+          const list = Array.isArray(records) ? records : [];
+          SECTION_PATIENT_INDEX_CACHE[cacheKey] = list;
+          SECTION_PATIENT_INDEX_ERRORS[cacheKey] = null;
+          return list;
         })
         .catch(err => {
           console.warn("Failed to load patient index for", normKey, err);
-          SECTION_PATIENT_INDEX_CACHE[cacheKey] = [];
+          SECTION_PATIENT_INDEX_ERRORS[cacheKey] = err?.message || "تعذر تحميل فهرس المرضى من قاعدة البيانات";
           return [];
         })
         .finally(() => SECTION_PATIENT_INDEX_LOADING.delete(cacheKey)));
@@ -5766,7 +5811,7 @@ async function loadSectionPatientIndex(sectionKey) {
 }
 
 function getSectionPatientIndex(sectionKey) {
-  const normKey = OUTSTANDING_PAGE_SECTION[sectionKey] || sectionKey;
+  const normKey = resolveSectionKey(sectionKey);
   const meta = OUTSTANDING_SECTION_META[normKey];
   if (!meta || !meta.patientPage) return [];
   const cacheKey = normKey === "dental" ? "dental" : "clinic";
@@ -5883,13 +5928,24 @@ function renderOutstandingCard(meta, debtors, info) {
 }
 function renderOutstandingBalances(sectionKey) {
   const c = document.getElementById("content");
-  const meta = OUTSTANDING_SECTION_META[sectionKey] || (typeof OUTSTANDING_PAGE_SECTION !== "undefined" && OUTSTANDING_PAGE_SECTION[sectionKey] ? OUTSTANDING_SECTION_META[OUTSTANDING_PAGE_SECTION[sectionKey]] : null);
-  if (!meta || !canOutstandingSection(sectionKey)) { renderAccessDenied(); return; }
+  const resolved = resolveSectionKey(sectionKey);
+  const meta = OUTSTANDING_SECTION_META[resolved] || OUTSTANDING_SECTION_META[sectionKey] || (typeof OUTSTANDING_PAGE_SECTION !== "undefined" && OUTSTANDING_PAGE_SECTION[sectionKey] ? OUTSTANDING_SECTION_META[OUTSTANDING_PAGE_SECTION[sectionKey]] : null);
+  if (!meta || !canOutstandingSection(resolved || sectionKey)) { renderAccessDenied(); return; }
   if (!renderExactVisitsGate(c, state.page, `${meta.icon} ${meta.label}`)) return;
-  const patientIndexList = typeof getSectionPatientIndex === "function" ? getSectionPatientIndex(meta.listKey || sectionKey) : [];
-  const debtors = groupPatients(outstandingVisits(meta)).filter(g => g.totalDue > 0.01).sort((a, b) => b.totalDue - a.totalDue);
+
+  const cacheKey = resolved === "dental" ? "dental" : "clinic";
+  const indexError = SECTION_PATIENT_INDEX_ERRORS[cacheKey];
+  const patientIndexList = typeof getSectionPatientIndex === "function" ? getSectionPatientIndex(resolved || meta.listKey || sectionKey) : [];
+  const debtors = groupPatients(outstandingVisits(meta), patientIndexList).filter(g => g.totalDue > 0.01).sort((a, b) => b.totalDue - a.totalDue);
   const mismatches = getIndexReconciliationMismatches(debtors, patientIndexList);
   const info = outstandingPageInfo(debtors, `outstanding_${meta.listKey}`);
+
+  const errorHTML = indexError ? `
+    <div class="card" style="border:1.5px solid #EF4444; background:#FEF2F2; padding:12px 16px; margin-bottom:16px; display:flex; align-items:center; justify-content:space-between; border-radius:8px;">
+      <span style="color:#991B1B; font-weight:600; font-size:14px;">⚠️ تعذّر تحميل فهرس ملفات المرضى لهذا القسم (${esc(indexError)}). قد تظهر بعض بيانات الهوية غير مكتملة.</span>
+      <button class="btn sm danger" data-retry-index="${cacheKey}">إعادة المحاولة</button>
+    </div>` : "";
+
   const reconciliationHTML = mismatches.length === 0 ? "" : `
     <div class="card" style="margin-top:20px; border:1.5px solid #F59E0B; background:#FFFBEB;">
       <div class="section-title" style="color:#B45309; display:flex; align-items:center; gap:8px;">
@@ -5911,7 +5967,13 @@ function renderOutstandingBalances(sectionKey) {
         </tr>`).join("")}</tbody>
       </table></div>
     </div>`;
-  c.innerHTML = `<div class="outstanding-intro"><div class="section-title">${meta.icon} ${meta.label}</div><div class="hint">صفحة اليومية كاملة العرض للقسم المحدد. تعرض 20 اسمًا فقط في كل صفحة، مع ترقيم مستقل.</div></div><div class="outstanding-cards-grid">${renderOutstandingCard(meta, debtors, info)}</div>${reconciliationHTML}`;
+  c.innerHTML = `${errorHTML}<div class="outstanding-intro"><div class="section-title">${meta.icon} ${meta.label}</div><div class="hint">صفحة اليومية كاملة العرض للقسم المحدد. تعرض 20 اسمًا فقط في كل صفحة، مع ترقيم مستقل.</div></div><div class="outstanding-cards-grid">${renderOutstandingCard(meta, debtors, info)}</div>${reconciliationHTML}`;
+  c.querySelectorAll("[data-retry-index]").forEach(button => button.addEventListener("click", () => {
+    const k = button.dataset.retryIndex;
+    SECTION_PATIENT_INDEX_CACHE[k] = null;
+    SECTION_PATIENT_INDEX_ERRORS[k] = null;
+    route();
+  }));
   c.querySelectorAll("[data-outstanding-page]").forEach(button => button.addEventListener("click", () => {
     state.tablePage[button.dataset.outstandingPage] = Number(button.dataset.pageTo) || 1;
     route();
