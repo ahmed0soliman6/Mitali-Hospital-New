@@ -31,7 +31,6 @@ END;
 $$;
 
 -- 2. Non-mutating trigger function: NEVER alters or inflates NEW.payload
--- Only extracts explicit columns if NULL, and updates updated_at timestamp.
 CREATE OR REPLACE FUNCTION public.sync_explicit_table_timestamp()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
@@ -44,7 +43,6 @@ CREATE OR REPLACE FUNCTION public.sync_visit_table_columns()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
   NEW.updated_at = NOW();
-  -- Fill explicit columns from payload ONLY if explicit column is empty
   IF NEW.patient IS NULL OR NEW.patient = '' THEN
     NEW.patient = COALESCE(NULLIF(NEW.payload->>'patient', ''), NULLIF(NEW.payload->>'name', ''));
   END IF;
@@ -84,12 +82,11 @@ BEGIN
   IF NEW.linked_income_id IS NULL OR NEW.linked_income_id = '' THEN
     NEW.linked_income_id = NULLIF(NEW.payload->>'linkedIncomeId', '');
   END IF;
-  -- IMPORTANT: Never modify NEW.payload in trigger to prevent bloat & pollution!
   RETURN NEW;
 END;
 $$;
 
--- 3. Construct entity-specific tables, indexes, and optimized RLS policies
+-- 3. Construct entity-specific tables, ensure all columns exist, indexes, and optimized RLS policies
 DO $$
 DECLARE
   tbl TEXT;
@@ -117,28 +114,27 @@ BEGIN
   -- A. Visit Tables
   FOREACH tbl IN ARRAY visit_tbls LOOP
     EXECUTE FORMAT('
-      CREATE TABLE IF NOT EXISTS public.%1$I (
-        id TEXT PRIMARY KEY,
-        date DATE,
-        month TEXT,
-        file_no TEXT,
-        patient TEXT,
-        phone TEXT,
-        doctor_id TEXT,
-        doctor_name TEXT,
-        exam_type TEXT,
-        services JSONB DEFAULT ''[]''::jsonb,
-        total NUMERIC(12,2),
-        paid NUMERIC(12,2),
-        payment_method TEXT,
-        status TEXT,
-        notes TEXT,
-        linked_income_id TEXT,
-        next_visit_date DATE,
-        payload JSONB NOT NULL DEFAULT ''{}''::jsonb,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
+      CREATE TABLE IF NOT EXISTS public.%1$I (id TEXT PRIMARY KEY);
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS date DATE;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS month TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS file_no TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS patient TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS phone TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS doctor_id TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS doctor_name TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS exam_type TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS services JSONB DEFAULT ''[]''::jsonb;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS total NUMERIC(12,2);
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS paid NUMERIC(12,2);
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS payment_method TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS status TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS notes TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS linked_income_id TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS next_visit_date DATE;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT ''{}''::jsonb;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
       CREATE INDEX IF NOT EXISTS %1$I_date_idx ON public.%1$I(date DESC, id DESC);
       CREATE INDEX IF NOT EXISTS %1$I_month_idx ON public.%1$I(month DESC, id DESC);
       CREATE INDEX IF NOT EXISTS %1$I_patient_idx ON public.%1$I(patient);
@@ -158,22 +154,21 @@ BEGIN
   -- B. Finance Tables (income, expense, lab_expenses)
   FOREACH tbl IN ARRAY finance_tbls LOOP
     EXECUTE FORMAT('
-      CREATE TABLE IF NOT EXISTS public.%1$I (
-        id TEXT PRIMARY KEY,
-        date DATE,
-        month TEXT,
-        party TEXT,
-        category TEXT,
-        description TEXT,
-        amount NUMERIC(12,2),
-        payment_method TEXT,
-        receipt_no TEXT,
-        notes TEXT,
-        linked_visit_id TEXT,
-        payload JSONB NOT NULL DEFAULT ''{}''::jsonb,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
+      CREATE TABLE IF NOT EXISTS public.%1$I (id TEXT PRIMARY KEY);
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS date DATE;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS month TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS party TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS category TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS description TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS amount NUMERIC(12,2);
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS payment_method TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS receipt_no TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS notes TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS linked_visit_id TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT ''{}''::jsonb;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
       CREATE INDEX IF NOT EXISTS %1$I_date_idx ON public.%1$I(date DESC, id DESC);
       CREATE INDEX IF NOT EXISTS %1$I_month_idx ON public.%1$I(month DESC, id DESC);
       CREATE INDEX IF NOT EXISTS %1$I_category_idx ON public.%1$I(category);
@@ -187,79 +182,75 @@ BEGIN
   END LOOP;
 
   -- C. Payroll
-  CREATE TABLE IF NOT EXISTS public.payroll (
-    id TEXT PRIMARY KEY,
-    month TEXT,
-    date DATE,
-    employee_id TEXT,
-    employee_name TEXT,
-    role TEXT,
-    amount NUMERIC(12,2),
-    salary NUMERIC(12,2),
-    bonus NUMERIC(12,2),
-    deductions NUMERIC(12,2),
-    net_salary NUMERIC(12,2),
-    status TEXT,
-    payment_method TEXT,
-    notes TEXT,
-    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  );
+  CREATE TABLE IF NOT EXISTS public.payroll (id TEXT PRIMARY KEY);
+  ALTER TABLE public.payroll ADD COLUMN IF NOT EXISTS month TEXT;
+  ALTER TABLE public.payroll ADD COLUMN IF NOT EXISTS date DATE;
+  ALTER TABLE public.payroll ADD COLUMN IF NOT EXISTS employee_id TEXT;
+  ALTER TABLE public.payroll ADD COLUMN IF NOT EXISTS employee_name TEXT;
+  ALTER TABLE public.payroll ADD COLUMN IF NOT EXISTS role TEXT;
+  ALTER TABLE public.payroll ADD COLUMN IF NOT EXISTS amount NUMERIC(12,2);
+  ALTER TABLE public.payroll ADD COLUMN IF NOT EXISTS salary NUMERIC(12,2);
+  ALTER TABLE public.payroll ADD COLUMN IF NOT EXISTS bonus NUMERIC(12,2);
+  ALTER TABLE public.payroll ADD COLUMN IF NOT EXISTS deductions NUMERIC(12,2);
+  ALTER TABLE public.payroll ADD COLUMN IF NOT EXISTS net_salary NUMERIC(12,2);
+  ALTER TABLE public.payroll ADD COLUMN IF NOT EXISTS status TEXT;
+  ALTER TABLE public.payroll ADD COLUMN IF NOT EXISTS payment_method TEXT;
+  ALTER TABLE public.payroll ADD COLUMN IF NOT EXISTS notes TEXT;
+  ALTER TABLE public.payroll ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb;
+  ALTER TABLE public.payroll ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+  ALTER TABLE public.payroll ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
   CREATE INDEX IF NOT EXISTS payroll_month_idx ON public.payroll(month DESC, id DESC);
   CREATE INDEX IF NOT EXISTS payroll_date_idx ON public.payroll(date DESC, id DESC);
   CREATE INDEX IF NOT EXISTS payroll_emp_idx ON public.payroll(employee_id);
 
   -- D. Doctors
-  CREATE TABLE IF NOT EXISTS public.doctors (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    specialty TEXT,
-    phone TEXT,
-    fee_mode TEXT,
-    clinic_pct NUMERIC(5,2),
-    doc_pct NUMERIC(5,2),
-    checkup_clinic_fee NUMERIC(12,2),
-    status TEXT,
-    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  );
+  CREATE TABLE IF NOT EXISTS public.doctors (id TEXT PRIMARY KEY);
+  ALTER TABLE public.doctors ADD COLUMN IF NOT EXISTS name TEXT;
+  ALTER TABLE public.doctors ADD COLUMN IF NOT EXISTS specialty TEXT;
+  ALTER TABLE public.doctors ADD COLUMN IF NOT EXISTS phone TEXT;
+  ALTER TABLE public.doctors ADD COLUMN IF NOT EXISTS fee_mode TEXT;
+  ALTER TABLE public.doctors ADD COLUMN IF NOT EXISTS clinic_pct NUMERIC(5,2);
+  ALTER TABLE public.doctors ADD COLUMN IF NOT EXISTS doc_pct NUMERIC(5,2);
+  ALTER TABLE public.doctors ADD COLUMN IF NOT EXISTS checkup_clinic_fee NUMERIC(12,2);
+  ALTER TABLE public.doctors ADD COLUMN IF NOT EXISTS status TEXT;
+  ALTER TABLE public.doctors ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb;
+  ALTER TABLE public.doctors ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+  ALTER TABLE public.doctors ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
   CREATE INDEX IF NOT EXISTS doctors_name_idx ON public.doctors(name);
   CREATE INDEX IF NOT EXISTS doctors_status_idx ON public.doctors(status);
 
   -- E. Employees
-  CREATE TABLE IF NOT EXISTS public.employees (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    role TEXT,
-    phone TEXT,
-    base_salary NUMERIC(12,2),
-    status TEXT,
-    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  );
+  CREATE TABLE IF NOT EXISTS public.employees (id TEXT PRIMARY KEY);
+  ALTER TABLE public.employees ADD COLUMN IF NOT EXISTS name TEXT;
+  ALTER TABLE public.employees ADD COLUMN IF NOT EXISTS role TEXT;
+  ALTER TABLE public.employees ADD COLUMN IF NOT EXISTS phone TEXT;
+  ALTER TABLE public.employees ADD COLUMN IF NOT EXISTS base_salary NUMERIC(12,2);
+  ALTER TABLE public.employees ADD COLUMN IF NOT EXISTS status TEXT;
+  ALTER TABLE public.employees ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb;
+  ALTER TABLE public.employees ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+  ALTER TABLE public.employees ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
   CREATE INDEX IF NOT EXISTS employees_name_idx ON public.employees(name);
   CREATE INDEX IF NOT EXISTS employees_status_idx ON public.employees(status);
 
   -- F. Patient File Indexes
   FOREACH tbl IN ARRAY index_tbls LOOP
     EXECUTE FORMAT('
-      CREATE TABLE IF NOT EXISTS public.%1$I (
-        id TEXT PRIMARY KEY,
-        name TEXT,
-        phone TEXT,
-        file_no TEXT,
-        patient_key TEXT,
-        last_visit_date DATE,
-        visits_count INTEGER,
-        total_paid NUMERIC(12,2),
-        total_due NUMERIC(12,2),
-        payload JSONB NOT NULL DEFAULT ''{}''::jsonb,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
+      CREATE TABLE IF NOT EXISTS public.%1$I (id TEXT PRIMARY KEY);
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS name TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS phone TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS file_no TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS patient_key TEXT;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS last_visit_date DATE;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS visits_count INTEGER;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS total_paid NUMERIC(12,2);
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS total_due NUMERIC(12,2);
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT ''{}''::jsonb;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
       CREATE INDEX IF NOT EXISTS %1$I_name_idx ON public.%1$I(name);
       CREATE INDEX IF NOT EXISTS %1$I_phone_idx ON public.%1$I(phone);
       CREATE INDEX IF NOT EXISTS %1$I_file_no_idx ON public.%1$I(file_no);
@@ -270,27 +261,24 @@ BEGIN
   -- G. Config & Settings
   FOREACH tbl IN ARRAY config_tbls LOOP
     EXECUTE FORMAT('
-      CREATE TABLE IF NOT EXISTS public.%1$I (
-        id TEXT PRIMARY KEY,
-        value JSONB,
-        payload JSONB NOT NULL DEFAULT ''{}''::jsonb,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
+      CREATE TABLE IF NOT EXISTS public.%1$I (id TEXT PRIMARY KEY);
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS value JSONB;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT ''{}''::jsonb;
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+      ALTER TABLE public.%1$I ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
     ', tbl);
   END LOOP;
 
   -- H. Audit Log
-  CREATE TABLE IF NOT EXISTS public.audit_log (
-    id TEXT PRIMARY KEY,
-    date DATE,
-    user_id TEXT,
-    action TEXT,
-    module TEXT,
-    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  );
+  CREATE TABLE IF NOT EXISTS public.audit_log (id TEXT PRIMARY KEY);
+  ALTER TABLE public.audit_log ADD COLUMN IF NOT EXISTS date DATE;
+  ALTER TABLE public.audit_log ADD COLUMN IF NOT EXISTS user_id TEXT;
+  ALTER TABLE public.audit_log ADD COLUMN IF NOT EXISTS action TEXT;
+  ALTER TABLE public.audit_log ADD COLUMN IF NOT EXISTS module TEXT;
+  ALTER TABLE public.audit_log ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb;
+  ALTER TABLE public.audit_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+  ALTER TABLE public.audit_log ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
   CREATE INDEX IF NOT EXISTS audit_log_date_idx ON public.audit_log(date DESC, id DESC);
 
   -- I. High-Performance RLS Policies using (SELECT public.has_permission(...))
