@@ -361,6 +361,8 @@
   .pill.expense{background:var(--expense-soft); color:var(--expense);}
   .pill.type-dental{background:#EFE6F7; color:#6A3FA0;}
   .pill.type-clinic{background:#E3EFF7; color:#2A6DA6;}
+  .pill.type-labs{background:#E8F5E9; color:#2E7D32;}
+  .pill.type-radiology{background:#FFF3E0; color:#E65100;}
   .empty-row td{text-align:center; color:var(--muted); padding:30px; font-size:13px;}
 
   /* ---------- Misc ---------- */
@@ -2193,7 +2195,7 @@ async function getUnifiedDoctorReport(month, options = {}) {
         doctorId: d.id,
         name: d.name,
         specialty: d.specialty || "",
-        type: d.type,
+        type: (d.type && d.type !== "undefined") ? d.type : (d.specialty === "أسنان" ? "أسنان" : (d.specialty === "تحاليل" ? "تحاليل" : (String(d.specialty || "").includes("اشعة") || String(d.specialty || "").includes("أشعة") ? "أشعة" : "عيادات"))),
         count: breakdown.visitCount,
         rev: breakdown.grossRevenue,
         grossRevenue: breakdown.grossRevenue,
@@ -2231,6 +2233,11 @@ async function getUnifiedDoctorReport(month, options = {}) {
       if (!fetcher) throw new Error("getDoctorMonthReport not available");
       const res = await fetcher(ym);
       if (!res || !Array.isArray(res.byDoctor)) throw new Error("invalid-doctor-report-response");
+      res.byDoctor = res.byDoctor.map(r => {
+        const docObj = (DB.doctors || []).find(d => d.id === r.doctorId || d.name === r.name);
+        const resolvedType = (r.type && r.type !== "undefined") ? r.type : (docObj?.type || (r.specialty === "أسنان" || docObj?.specialty === "أسنان" ? "أسنان" : (r.specialty === "تحاليل" || docObj?.specialty === "تحاليل" ? "تحاليل" : (String(r.specialty || docObj?.specialty || "").includes("اشعة") || String(r.specialty || docObj?.specialty || "").includes("أشعة") ? "أشعة" : "عيادات"))));
+        return { ...r, type: resolvedType };
+      });
       DOCTOR_REPORTS_CACHE[ym] = { data: res, at: Date.now() };
       delete DOCTOR_REPORTS_ERRORS[ym];
       return res;
@@ -3446,11 +3453,31 @@ const PAGE_TITLES = {
 let state = { page: "dashboard", pageHistory: [], lastRoutedPage: null, skipPageHistory: false, editId: null, editDocId: null, editUserId: null, editEmpId: null, dashboardPeriod: "today", dashboardDoctor: "", patientSearch: "", patientSearchOpen: false, selectedPatientKey: null, closingMonth: null, doctorMonth: todayISO().slice(0, 7), ledgerSearch: "", ledgerReceipt: null, incomeMonth: null, expenseMonth: null, ledgerMonth: null, payrollMonth: null, tablePage: {} };
 const PAGE_KEY = APP_PREFIX + "current_page";
 function saveCurrentPage(page) {
-  try { localStorage.setItem(PAGE_KEY, page); } catch (e) { /* ignore */ }
+  if (!page || page === "login") return;
+  try {
+    localStorage.setItem(PAGE_KEY, page);
+    if (window.location.hash !== "#" + page) {
+      window.history.replaceState(null, "", "#" + page);
+    }
+  } catch (e) { /* ignore */ }
 }
 function getSavedPage() {
-  try { return localStorage.getItem(PAGE_KEY); } catch (e) { return null; }
+  const hash = (window.location.hash || "").replace(/^#\/?/, "").trim();
+  if (hash && isPageAccessible(hash)) return hash;
+  try {
+    const saved = localStorage.getItem(PAGE_KEY);
+    if (saved && isPageAccessible(saved)) return saved;
+  } catch (e) { return null; }
+  return null;
 }
+window.addEventListener("hashchange", () => {
+  if (!currentUser) return;
+  const hash = (window.location.hash || "").replace(/^#\/?/, "").trim();
+  if (hash && hash !== state.page && isPageAccessible(hash)) {
+    state.page = hash;
+    route();
+  }
+});
 function isPageAccessible(page) {
   page = normalizePageId(page);
   if (!page) return false;
@@ -7251,7 +7278,12 @@ function renderReports() {
     return `<table>
       <thead><tr><th>الطبيب</th><th>النوع</th><th>عدد الزيارات</th><th>الإيرادات</th><th>حصة المجمع</th><th>حصة الطبيب</th></tr></thead>
       <tbody>
-        ${items.map(r => `<tr><td>${esc(r.name)}</td><td><span class="pill ${r.type==='أسنان'?'type-dental':'type-clinic'}">${r.type}</span></td><td>${r.count}</td><td>${fmt(r.rev)}</td><td>${fmt(r.clinic)}</td><td>${fmt(r.doc)}</td></tr>`).join("")}
+        ${items.map(r => {
+          const docObj = (DB.doctors || []).find(d => d.id === r.doctorId || d.name === r.name);
+          const rawType = (r.type && r.type !== "undefined") ? r.type : (docObj?.type || (r.specialty === "أسنان" || docObj?.specialty === "أسنان" ? "أسنان" : (r.specialty === "تحاليل" || docObj?.specialty === "تحاليل" ? "تحاليل" : (String(r.specialty || docObj?.specialty || "").includes("اشعة") || String(r.specialty || docObj?.specialty || "").includes("أشعة") ? "أشعة" : "عيادات"))));
+          const badgeClass = rawType === "أسنان" ? "type-dental" : (rawType === "تحاليل" ? "type-labs" : (rawType === "أشعة" ? "type-radiology" : "type-clinic"));
+          return `<tr><td>${esc(r.name)}</td><td><span class="pill ${badgeClass}">${esc(rawType)}</span></td><td>${r.count}</td><td>${fmt(r.rev)}</td><td>${fmt(r.clinic)}</td><td>${fmt(r.doc)}</td></tr>`;
+        }).join("")}
       </tbody>
     </table>`;
   }
@@ -9353,17 +9385,16 @@ function clearSession() {
 async function validateSessionSecurity() {
   if (!currentUser) return false;
   if (currentUser.sessionExpiresAt && Number(currentUser.sessionExpiresAt) <= Date.now()) return false;
-  const account = getCurrentAccount();
+  const account = getCurrentAccount() || currentUser;
   if (!account || account.status === "موقوف") return false;
   const localVersion = Number(currentUser.credentialVersion || currentUser.securityVersion || account.credentialVersion || account.securityVersion || 1);
   if (Number(account.credentialVersion || account.securityVersion || 1) !== localVersion) return false;
-  if (currentUser.firebaseUid && window.MitaliSupabase) {
+  if ((currentUser.firebaseUid || currentUser.id) && window.MitaliSupabase) {
     const authUser = window.MitaliSupabase.authUser();
-    const offlineTrusted = !navigator.onLine && Number(currentUser.offlineTrustedUntil || 0) > Date.now();
-    if (!authUser && !offlineTrusted) return false;
-    if (authUser && navigator.onLine && window.MitaliSupabase.getUserProfile) {
+    const uid = authUser?.uid || authUser?.id;
+    if (uid && navigator.onLine && window.MitaliSupabase.getUserProfile) {
       try {
-        const profile = await window.MitaliSupabase.getUserProfile(authUser.uid, { source: navigator.onLine ? "server" : undefined });
+        const profile = await window.MitaliSupabase.getUserProfile(uid, { source: navigator.onLine ? "server" : undefined });
         if (profile) {
           if (profile.status === "موقوف") return false;
           const remoteVersion = Number(profile.credentialVersion || profile.securityVersion || 1);
@@ -9784,7 +9815,7 @@ async function boot() {
     // شاشة الدخول، ثم نقرأ بيانات الصفحة الحالية بعد نجاح الجلسة.
     // لا نقرأ users بالكامل قبل المصادقة. نحمّل كاش الحسابات محليًا فقط
     // لاستخدام اعتماد الجهاز السابق، ثم يقرأ Supabase Auth ملف المستخدم الحالي.
-    const bootKeys = getSession() ? CORE_BOOT_KEYS.filter(key => key !== "staffAccounts") : ["staffAccounts"];
+    const bootKeys = CORE_BOOT_KEYS;
     await loadKeys(bootKeys, { preferCache: true });
   } catch (e) {
     console.error("Load error, maintaining cache:", e);
@@ -9815,14 +9846,18 @@ async function boot() {
   // الحالي من users مباشرة إذا لم يكن موجودًا في الكاش، ثم نضعه في الكاش دون
   // إعادة تحميل قائمة الحسابات كاملة.
   let sessionAccount = (DB.staffAccounts || []).find(a => a.id === currentUser.id || (currentUser.username && a.username === currentUser.username));
-  if (!sessionAccount && currentUser.firebaseUid && window.MitaliSupabase && window.MitaliSupabase.getUserProfile) {
+  if (!sessionAccount && (currentUser.firebaseUid || currentUser.id) && window.MitaliSupabase && window.MitaliSupabase.getUserProfile) {
     try {
       const authUser = window.MitaliSupabase.authUser();
-      if (authUser && authUser.uid === currentUser.firebaseUid) {
-        sessionAccount = await window.MitaliSupabase.getUserProfile(authUser.uid, { source: navigator.onLine ? "server" : undefined });
-        if (sessionAccount) DB.staffAccounts = [...(DB.staffAccounts || []).filter(a => a.firebaseUid !== sessionAccount.firebaseUid), sessionAccount];
+      const matchUid = authUser?.uid || authUser?.id;
+      if (matchUid && (matchUid === currentUser.firebaseUid || matchUid === currentUser.id)) {
+        sessionAccount = await window.MitaliSupabase.getUserProfile(matchUid, { source: navigator.onLine ? "server" : undefined });
+        if (sessionAccount) DB.staffAccounts = [...(DB.staffAccounts || []).filter(a => a.id !== sessionAccount.id), sessionAccount];
       }
     } catch (profileReadError) { console.warn("Current profile restore failed:", profileReadError); }
+  }
+  if (!sessionAccount && currentUser && (!currentUser.sessionExpiresAt || Number(currentUser.sessionExpiresAt) > Date.now())) {
+    sessionAccount = currentUser;
   }
   if (!sessionAccount || sessionAccount.status === "موقوف") { clearSession(); renderLogin(); return; }
   if (!(await validateSessionSecurity())) {

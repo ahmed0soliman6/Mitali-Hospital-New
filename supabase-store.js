@@ -248,6 +248,7 @@
         id: String(payload.id),
         name: payload.name || null,
         specialty: payload.specialty || null,
+        type: payload.type || null,
         phone: payload.phone || null,
         fee_mode: payload.feeMode || null,
         clinic_pct: payload.clinicPct != null ? Number(payload.clinicPct) : null,
@@ -346,6 +347,7 @@
     // Doctor & Employee fields
     if (row.name !== undefined && row.name !== null && !res.name) res.name = row.name;
     if (row.specialty !== undefined && row.specialty !== null) res.specialty = row.specialty;
+    if (row.type !== undefined && row.type !== null) res.type = row.type;
     if (row.fee_mode !== undefined && row.fee_mode !== null) res.feeMode = row.fee_mode;
     if (row.clinic_pct !== undefined && row.clinic_pct !== null) res.clinicPct = Number(row.clinic_pct);
     if (row.doc_pct !== undefined && row.doc_pct !== null) res.docPct = Number(row.doc_pct);
@@ -440,7 +442,13 @@
     currentSessionUser = null;
     try { await init().auth.signOut(); } catch (_e) {}
   }
-  function currentUser() { init(); return currentSessionUser; }
+  function currentUser() {
+    init();
+    if (!currentSessionUser) return null;
+    return Object.assign({}, currentSessionUser, {
+      uid: currentSessionUser.uid || currentSessionUser.id || ""
+    });
+  }
   async function getTable(key) {
     await ready();
     const c = config();
@@ -921,18 +929,33 @@
     } catch (_e) {}
     if (client) {
       try {
-        let qIn = client.from("income").select("amount, date");
-        let qEx = client.from("expense").select("amount, date");
-        if (month !== "all") {
-          const last = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).getUTCDate();
-          const start = `${month}-01`;
-          const end = `${month}-${String(last).padStart(2, "0")}`;
-          qIn = qIn.gte("date", start).lte("date", end);
-          qEx = qEx.gte("date", start).lte("date", end);
+        const { data: rpcData, error: rpcErr } = await client.rpc("get_financial_summary", { p_month: month });
+        if (!rpcErr && rpcData && typeof rpcData.totalIncome === "number") {
+          return rpcData;
         }
-        const [rIn, rEx] = await Promise.all([qIn, qEx]);
-        const incRows = Array.isArray(rIn.data) ? rIn.data : [];
-        const expRows = Array.isArray(rEx.data) ? rEx.data : [];
+      } catch (_rpcE) {}
+      try {
+        async function fetchAll(table) {
+          let rows = [];
+          let from = 0;
+          const batchSize = 1000;
+          while (true) {
+            let q = client.from(table).select("amount, date").range(from, from + batchSize - 1);
+            if (month !== "all") {
+              const last = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).getUTCDate();
+              const start = `${month}-01`;
+              const end = `${month}-${String(last).padStart(2, "0")}`;
+              q = q.gte("date", start).lte("date", end);
+            }
+            const { data, error } = await q;
+            if (error || !Array.isArray(data) || !data.length) break;
+            rows = rows.concat(data);
+            if (data.length < batchSize) break;
+            from += batchSize;
+          }
+          return rows;
+        }
+        const [incRows, expRows] = await Promise.all([fetchAll("income"), fetchAll("expense")]);
         const totalIncome = incRows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
         const totalExpense = expRows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
         return {
