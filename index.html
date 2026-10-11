@@ -594,6 +594,8 @@ function can(moduleKey, actionKey) {
   if (!account) return false;
   if (account.status === "موقوف") return false;
   if (account.role === "مدير") return true;
+  // الأطباء والموظفون والتصنيفات والتخصصات والخدمات: العرض (view) متاح دائمًا لجميع المستخدمين النشطين
+  if (actionKey === "view" && ["doctors", "employees", "categories", "specialties", "services"].includes(moduleKey)) return true;
   return !!(account.permissions && account.permissions[moduleKey] && account.permissions[moduleKey][actionKey]);
 }
 function hasAnySettingsAccess() {
@@ -1365,8 +1367,19 @@ function doctorFeeSummary(d) {
   if (mode === "fixed_daily") return `أجر يومي ثابت ${fmt(d.dailyFixedAmount)} ج.م`;
   return `كشف ${fmt(d.checkupPrice)} (مجمع ${fmt(d.checkupClinicFee)}) · متابعة ${fmt(d.followupPrice)} (مجمع ${fmt(d.followupClinicFee)}) · استشارة ${fmt(d.consultationPrice ?? d.checkupPrice)} · جلسة ${fmt(d.sessionPrice ?? d.checkupPrice)}`;
 }
-function dName(id) { const d = DB.doctors.find(x => x.id === id); return d ? d.name : "-"; }
-function dInfo(id) { return DB.doctors.find(x => x.id === id); }
+function dName(id, fallbackName = "") {
+  if (!id && !fallbackName) return "-";
+  const idStr = String(id || "").trim();
+  const d = (DB.doctors || []).find(x => x.id === idStr || (idStr && x.name === idStr));
+  if (d) return d.name;
+  if (fallbackName && String(fallbackName).trim()) return String(fallbackName).trim();
+  if (idStr && !/^[a-z0-9_-]{12,}$/i.test(idStr)) return idStr;
+  return "-";
+}
+function dInfo(id) {
+  const idStr = String(id || "").trim();
+  return (DB.doctors || []).find(x => x.id === idStr || (idStr && x.name === idStr));
+}
 
 function seedDoctors() {
   return [
@@ -2160,7 +2173,7 @@ async function getUnifiedDoctorReport(month, options = {}) {
 
 function settlementMonthKey() { return state.settlementMonth || (state.payrollMonth !== "all" && state.payrollMonth) || state.payrollMonth || todayISO().slice(0, 7); }
 function exactVisitsPlan(page) {
-  if (STORAGE_MODE !== "supabase") return null;
+  if (STORAGE_MODE !== "supabase" && STORAGE_MODE !== "firestore") return null;
   const id = normalizePageId(page);
   if (id === "payroll") {
     const ym = String(settlementMonthKey());
@@ -2199,7 +2212,9 @@ function clearExactVisits() {
   for (const key of Object.keys(EXACT_VISITS_ERRORS)) delete EXACT_VISITS_ERRORS[key];
 }
 async function fetchExactVisitRows(key, scope) {
-  if (scope === "all") return (await window.MitaliSupabase.getTable(key)) || [];
+  const store = window.MitaliSupabase || window.MitaliFirebase;
+  if (!store) return [];
+  if (scope === "all") return (await store.getTable(key)) || [];
   const [year, month] = scope.split("-").map(Number);
   const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
   const where = [
@@ -2209,7 +2224,7 @@ async function fetchExactVisitRows(key, scope) {
   const rows = [];
   let cursor = null;
   for (let i = 0; i < 400; i++) {
-    const result = await window.MitaliSupabase.getPage(key, { pageSize: 50, cursor, where });
+    const result = await store.getPage(key, { pageSize: 50, cursor, where });
     rows.push(...(Array.isArray(result.records) ? result.records : []));
     if (!result.hasMore || !result.nextCursor) return rows;
     cursor = result.nextCursor;
@@ -2218,7 +2233,7 @@ async function fetchExactVisitRows(key, scope) {
 }
 async function ensureExactVisits(page) {
   const plan = exactVisitsPlan(page);
-  if (!plan || !currentUser || !window.MitaliSupabase) return;
+  if (!plan || !currentUser || !(window.MitaliSupabase || window.MitaliFirebase)) return;
   const visitLoads = plan.keys.filter(key => !exactEntryFresh(key, plan.scope)).map(key => {
     const id = `${key}|${plan.scope}`;
     if (!EXACT_VISITS_LOADING.has(id)) {
@@ -2281,7 +2296,7 @@ async function reconcileVisitIncomeLinks() {
   return { incomeChanged: beforeIncome !== JSON.stringify(DB.income), changedVisitKeys: [...changedVisitKeys] };
 }
 async function ensurePageDataLoaded(page, options = {}) {
-  if (STORAGE_MODE !== "supabase" || !currentUser) return;
+  if ((STORAGE_MODE !== "supabase" && STORAGE_MODE !== "firestore") || !currentUser) return;
   // الصفحات المالية الدقيقة تحمّل الزيارات كاملة (ensureExactVisits) بدل أول 50 سجلاً.
   const exactPlan = exactVisitsPlan(page);
   if (!exactPlan) clearExactVisits();
@@ -2327,7 +2342,7 @@ async function ensurePageDataLoaded(page, options = {}) {
   if (currentUser && !isMidEdit() && !isUserActivelyTyping()) route();
 }
 function schedulePageDataLoad(page) {
-  if (STORAGE_MODE !== "supabase" || !currentUser) return;
+  if ((STORAGE_MODE !== "supabase" && STORAGE_MODE !== "firestore") || !currentUser) return;
   Promise.resolve().then(() => ensurePageDataLoaded(page)).catch(error => console.warn("Scheduled page refresh failed:", error));
 }
 // جداول السجلات التى تحمل طابعًا زمنيًا (updatedAt) لكل عنصر فيها لأغراض حل
@@ -2954,12 +2969,14 @@ async function syncVisitIncomeLink(rec, kind, skipPersist) {
       linked.desc = desc;
       linked.amount = paid;
       linked.paymentMethod = rec.paymentMethod || linked.paymentMethod;
+      if (rec.doctorId) linked.doctorId = rec.doctorId;
     } else {
       const inc = {
         id: `visit-income-${kind}-${rec.id}`, date: rec.date || todayISO(), receiptNo: stableReceiptNo,
         party: rec.patient, category: (VISIT_KIND_META[kind] || VISIT_KIND_META.clinic).incomeCategory, desc,
         paymentMethod: rec.paymentMethod || "نقدي", amount: paid,
         receiver: currentUser ? currentUser.displayName : "", notes: "تم إنشاؤه تلقائيًا من سجل الزيارات",
+        doctorId: rec.doctorId || null,
         createdAt: rec.createdAt || nowISO(),
       };
       DB.income.push(inc);
@@ -4345,7 +4362,7 @@ function renderVisitsPage(kind) {
             return `<tr>
               <td>${v.date || "-"}${entryTimeDisplay(v.createdAt) ? `<div class="hint" style="font-size:11px;">${entryTimeDisplay(v.createdAt)}</div>` : ""}</td>
               <td>${esc(v.patient)}</td>
-              <td>${esc(dName(v.doctorId))}</td>
+              <td>${esc(dName(v.doctorId, v.doctorName || v.doctor))}</td>
               <td>${esc(v.examType)}</td>
               <td>${fmt(v.total)}</td>
               <td>${fmt(v.paid)}</td>
@@ -5104,7 +5121,7 @@ function renderPatientCard(g) {
             return `<tr>
               <td>${v.date || "-"}${entryTimeDisplay(v.createdAt) ? `<div class="hint" style="font-size:11px;">${entryTimeDisplay(v.createdAt)}</div>` : ""}</td>
               <td>${v.kind}</td>
-              <td>${esc(dName(v.doctorId))}</td>
+              <td>${esc(dName(v.doctorId, v.doctorName || v.doctor))}</td>
               <td>${esc(v.examType)}</td>
               <td>${fmt(v.total)}</td>
               <td>${fmt(v.paid)}</td>
@@ -5751,7 +5768,7 @@ function renderMoneyPage(kind) {
               <td>${x.date || "-"}${entryTimeDisplay(x.createdAt) ? `<div class="hint" style="font-size:11px;">${entryTimeDisplay(x.createdAt)}</div>` : ""}</td>
               <td>${esc(x.party)}</td>
               <td><span class="pill ${isIncome ? "income" : "expense"}">${esc(x.category)}</span></td>
-              <td>${esc(x.desc)}${x.doctorId ? ` <span class="hint" title="إجمالي إيراد طبيب">🩺 ${esc(dName(x.doctorId))}</span>` : ""}</td>
+              <td>${esc(x.desc)}${(x.doctorId || x.doctorName || x.doctor) ? ` <span class="hint" title="إجمالي إيراد طبيب">🩺 ${esc(dName(x.doctorId, x.doctorName || x.doctor))}</span>` : ""}</td>
               <td>${esc(x.paymentMethod)}</td>
               <td style="font-weight:700;">${fmt(x.amount)}</td>
               <td>${esc(x[isIncome ? "receiver" : "responsible"])}</td>
@@ -6957,14 +6974,20 @@ console.log("Reports page ready.");
 // صفحة الإعدادات
 // ======================================================================
 function sortedDoctors() {
-  return [...DB.doctors].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  return [...(DB.doctors || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 }
 function renderSettings() {
   const c = document.getElementById("content");
-  // حماية نهائية: حتى لو أعاد Firestore وثيقة settings قديمة/ناقصة أو لم توجد
-  // بعد الحذف، لا يجوز أن ينهار القالب عند قراءة xrayTypes أو labTestTypes.
   DB.settings = ensureSettingsDefaults(DB.settings);
-  const editingDoc = state.editDocId ? DB.doctors.find(d => d.id === state.editDocId) : null;
+  if ((!DB.doctors || !DB.doctors.length) && window.MitaliSupabase) {
+    window.MitaliSupabase.getValue("doctors", []).then(docs => {
+      if (Array.isArray(docs) && docs.length && (!DB.doctors || !DB.doctors.length)) {
+        DB.doctors = docs;
+        if (state.page === "settings") renderSettings();
+      }
+    }).catch(e => console.warn("Auto-load doctors in settings failed:", e));
+  }
+  const editingDoc = state.editDocId ? (DB.doctors || []).find(d => d.id === state.editDocId) : null;
   const canSettingsEdit = can("settings", "edit");
   c.innerHTML = `
     <div class="release-card" role="status">
@@ -7519,6 +7542,11 @@ function renderSettings() {
         PATIENT_FILE_PAGE_STATE.patientFilesDental.pages = {};
         PATIENT_FILE_VISITS_CACHE.patientFilesClinic = {};
         PATIENT_FILE_VISITS_CACHE.patientFilesDental = {};
+        for (const k of Object.keys(FIRESTORE_PAGE_STATE)) delete FIRESTORE_PAGE_STATE[k];
+        for (const k of Object.keys(PAGE_DATA_LOADED_AT)) delete PAGE_DATA_LOADED_AT[k];
+        PAGE_DATA_LOADING.clear();
+        clearExactVisits();
+        DATA_VERSION++;
         restoreBackupInput.value = "";
         route();
       })();
@@ -7563,27 +7591,30 @@ function renderSettings() {
         if (!listKey) continue;
         batches[listKey] = batches[listKey] || [];
         const visitId = inc.id.replace(`visit-income-${kind}-`, "");
-        let patientName = inc.party || "";
+        const existing = (DB[listKey] || []).find(x => x && x.id === visitId);
+        let patientName = inc.party || (existing ? existing.patient : "");
         if (!patientName && inc.desc) {
           const m = inc.desc.match(/—\s*([^()]+)/);
           if (m) patientName = m[1].trim();
         }
-        const amt = Number(inc.amount) || 0;
-        const fileNo = (inc.receiptNo && !inc.receiptNo.startsWith("V-m")) ? inc.receiptNo.replace(/^V-/, "") : "";
+        const amt = Number(inc.amount) || (existing ? Number(existing.total) : 0) || 0;
+        const fileNo = (inc.receiptNo && !inc.receiptNo.startsWith("V-m")) ? inc.receiptNo.replace(/^V-/, "") : (existing ? existing.fileNo : "");
+        const docId = inc.doctorId || (existing ? existing.doctorId : "") || "";
         const payload = {
           id: visitId,
           date: inc.date || (inc.createdAt ? inc.createdAt.slice(0, 10) : todayISO()),
           patient: patientName || "مريض",
           fileNo: fileNo,
-          phone: "",
-          doctorId: inc.doctorId || "",
+          phone: inc.phone || (existing ? existing.phone : ""),
+          doctorId: docId,
+          doctorName: inc.doctorName || (existing ? existing.doctorName : ""),
           total: amt,
           paid: amt,
           status: "تم",
-          paymentMethod: inc.paymentMethod || "نقدي",
-          notes: (inc.notes && inc.notes !== "تم إنشاؤه تلقائيًا من سجل الزيارات") ? inc.notes : "",
+          paymentMethod: inc.paymentMethod || (existing ? existing.paymentMethod : "نقدي"),
+          notes: (inc.notes && inc.notes !== "تم إنشاؤه تلقائيًا من سجل الزيارات") ? inc.notes : (existing ? existing.notes : ""),
           linkedIncomeId: inc.id,
-          createdAt: inc.createdAt || nowISO(),
+          createdAt: inc.createdAt || (existing ? existing.createdAt : nowISO()),
           updatedAt: nowISO()
         };
         if (listKey === "visitsClinic" || listKey === "visitsDental") payload.examType = "كشف";
@@ -7605,6 +7636,11 @@ function renderSettings() {
       PATIENT_FILE_PAGE_STATE.patientFilesDental.pages = {};
       PATIENT_FILE_VISITS_CACHE.patientFilesClinic = {};
       PATIENT_FILE_VISITS_CACHE.patientFilesDental = {};
+      for (const k of Object.keys(FIRESTORE_PAGE_STATE)) delete FIRESTORE_PAGE_STATE[k];
+      for (const k of Object.keys(PAGE_DATA_LOADED_AT)) delete PAGE_DATA_LOADED_AT[k];
+      PAGE_DATA_LOADING.clear();
+      clearExactVisits();
+      DATA_VERSION++;
       logActivity(`استعادة ${totalRestored} زيارة من سجل الوارد`, "settings");
       saveToast(`تمت العملية بنجاح — تم استعادة ومزامنة ${totalRestored} زيارة إلى اليوميات وفهرسة ملفات المرضى`);
       route();

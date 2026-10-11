@@ -237,15 +237,26 @@
     await ready();
     const c = config();
     if (c) {
-      const { data, error } = await client.from("data_records").select("id,payload").eq("collection", collectionName(key)).order("updated_at", { ascending: false });
-      if (error) {
-        console.error("Supabase getTable error for " + collectionName(key) + ":", error);
-        throw Object.assign(new Error(error.message || "Supabase getTable failed"), { code: error.code, table: collectionName(key) });
+      const col = collectionName(key);
+      let allData = [];
+      let from = 0;
+      const batchSize = 1000;
+      while (true) {
+        const { data, error } = await client.from("data_records").select("id,payload").eq("collection", col).order("updated_at", { ascending: false }).range(from, from + batchSize - 1);
+        if (error) {
+          console.error("Supabase getTable error for " + col + ":", error);
+          throw Object.assign(new Error(error.message || "Supabase getTable failed"), { code: error.code, table: col });
+        }
+        if (Array.isArray(data)) {
+          allData = allData.concat(data);
+          if (data.length < batchSize) break;
+          from += batchSize;
+        } else {
+          break;
+        }
       }
-      if (Array.isArray(data)) {
-        metric(key, data.length);
-        return data.map(record);
-      }
+      metric(key, allData.length);
+      return allData.map(record);
     }
     if (window.MITALI_IS_PROD) {
       throw new Error("Supabase is not configured in production");
@@ -303,10 +314,15 @@
     if (!rows.length) return;
     const c = config();
     if (c) {
-      const { error } = await client.from("data_records").upsert(rows, { onConflict: "collection,id" });
-      if (error) {
-        console.error("Supabase upsertRecords error for " + collectionName(key) + ":", error);
-        throw Object.assign(new Error(error.message || "Supabase upsert failed"), { code: error.code, details: error.details, table: collectionName(key) });
+      const col = collectionName(key);
+      const chunkSize = 100;
+      for (let i = 0; i < rows.length; i += chunkSize) {
+        const chunk = rows.slice(i, i + chunkSize);
+        const { error } = await client.from("data_records").upsert(chunk, { onConflict: "collection,id" });
+        if (error) {
+          console.error("Supabase upsertRecords error for " + col + ":", error);
+          throw Object.assign(new Error(error.message || "Supabase upsert failed"), { code: error.code, details: error.details, table: col });
+        }
       }
       return;
     }
@@ -328,10 +344,16 @@
     if (!idSet.size) return;
     const c = config();
     if (c) {
-      const { error } = await client.from("data_records").delete().eq("collection", collectionName(key)).in("id", [...idSet]);
-      if (error) {
-        console.error("Supabase deleteRecords error for " + collectionName(key) + ":", error);
-        throw Object.assign(new Error(error.message || "Supabase delete failed"), { code: error.code, details: error.details, table: collectionName(key) });
+      const col = collectionName(key);
+      const idsArr = [...idSet];
+      const chunkSize = 100;
+      for (let i = 0; i < idsArr.length; i += chunkSize) {
+        const chunk = idsArr.slice(i, i + chunkSize);
+        const { error } = await client.from("data_records").delete().eq("collection", col).in("id", chunk);
+        if (error) {
+          console.error("Supabase deleteRecords error for " + col + ":", error);
+          throw Object.assign(new Error(error.message || "Supabase delete failed"), { code: error.code, details: error.details, table: col });
+        }
       }
       return;
     }
