@@ -62,6 +62,10 @@ module.exports = async function handler(req, res) {
     if (req.method === 'GET') {
       const { admin } = await requireManager(req);
       try {
+        const { data: staffData, error: staffErr } = await admin.from('staff_accounts').select('*').order('created_at');
+        if (!staffErr && Array.isArray(staffData) && staffData.length > 0) {
+          return json(res, 200, { accounts: staffData.map(publicProfile) });
+        }
         const { data, error } = await admin.from('profiles').select('*').order('created_at');
         if (error) throw error;
         if (Array.isArray(data)) return json(res, 200, { accounts: data.map(publicProfile) });

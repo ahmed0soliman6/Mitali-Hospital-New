@@ -8,19 +8,29 @@ const VISITS = [
 ];
 
 async function rows(db, table, month) {
-  let q = db.from(table).select('*');
-  if (/^\d{4}-\d{2}$/.test(month)) {
-    const last = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).getUTCDate();
-    q = q.gte('date', `${month}-01`).lte('date', `${month}-${String(last).padStart(2, '0')}`);
+  let all = [];
+  let from = 0;
+  const batchSize = 1000;
+
+  while (true) {
+    let q = db.from(table).select('*').range(from, from + batchSize - 1);
+    if (/^\d{4}-\d{2}$/.test(month)) {
+      const last = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).getUTCDate();
+      q = q.gte('date', `${month}-01`).lte('date', `${month}-${String(last).padStart(2, '0')}`);
+    }
+    const { data, error } = await q;
+    if (error) {
+      throw Object.assign(new Error(`Failed to query table ${table}: ${error.message || error}`), { status: 500, code: error.code || 'database-error' });
+    }
+    if (!Array.isArray(data)) {
+      throw Object.assign(new Error(`Invalid response format from database for ${table}`), { status: 500 });
+    }
+    all = all.concat(data);
+    if (data.length < batchSize) break;
+    from += batchSize;
   }
-  const { data, error } = await q;
-  if (error) {
-    throw Object.assign(new Error(`Failed to query table ${table}: ${error.message || error}`), { status: 500, code: error.code || 'database-error' });
-  }
-  if (!Array.isArray(data)) {
-    throw Object.assign(new Error(`Invalid response format from database for ${table}`), { status: 500 });
-  }
-  return data.map(x => {
+
+  return all.map(x => {
     const p = x.payload || {};
     return {
       ...p,
@@ -38,6 +48,7 @@ async function rows(db, table, month) {
       clinicPct: x.clinic_pct != null && x.clinic_pct !== '' ? Number(x.clinic_pct) : (p.clinicPct != null ? Number(p.clinicPct) : 0),
       checkupClinicFee: x.checkup_clinic_fee != null && x.checkup_clinic_fee !== '' ? Number(x.checkup_clinic_fee) : (p.checkupClinicFee != null ? Number(p.checkupClinicFee) : 0),
       specialty: x.specialty || p.specialty || '',
+      type: x.type || p.type || '',
       status: x.status || p.status || '',
       name: x.name || p.name || ''
     };
@@ -85,10 +96,12 @@ module.exports = async function handler(req, res) {
         const x = share(v, d);
         return { doc: s.doc + x.doc, clinic: s.clinic + x.clinic };
       }, { doc: 0, clinic: 0 });
+      const doctorType = d.type || (d.specialty === 'أسنان' ? 'أسنان' : (d.specialty === 'تحاليل' ? 'تحاليل' : (d.specialty === 'اشعة' || d.specialty === 'أشعة' ? 'أشعة' : 'عيادات')));
       return {
         doctorId: d.id,
         name: d.name,
         specialty: d.specialty || '',
+        type: doctorType,
         count: vs.length,
         rev: amount,
         grossRevenue: amount,

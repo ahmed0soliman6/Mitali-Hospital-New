@@ -8712,10 +8712,19 @@ async function refreshAccountsFromAdminApi(shouldRoute = true, force = false) {
           new Promise((_, reject) => setTimeout(() => reject(Object.assign(new Error("admin-accounts-refresh-timeout"), { code: "admin-accounts-refresh-timeout" })), ADMIN_ACCOUNTS_REFRESH_TIMEOUT_MS))
         ]);
         if (!Array.isArray(accounts)) throw new Error("invalid-admin-accounts-response");
-        DB.staffAccounts = accounts;
+        if (accounts.length > 0) {
+          const remoteMap = new Map(accounts.map(a => [a.username || a.id, a]));
+          const currentList = Array.isArray(DB.staffAccounts) ? DB.staffAccounts : [];
+          const merged = accounts.slice();
+          currentList.forEach(localAcc => {
+            const key = localAcc.username || localAcc.id;
+            if (!remoteMap.has(key)) merged.push(localAcc);
+          });
+          DB.staffAccounts = merged;
+        }
         ADMIN_ACCOUNTS_REFRESH_LAST_SUCCESS_AT = Date.now();
-        await cacheLocally("staffAccounts", accounts);
-        await writeSyncBaseline("staffAccounts", accounts);
+        await cacheLocally("staffAccounts", DB.staffAccounts);
+        await writeSyncBaseline("staffAccounts", DB.staffAccounts);
         ADMIN_ACCOUNTS_REFRESH_LAST_ERROR = "";
       } catch (error) {
         ADMIN_ACCOUNTS_REFRESH_LAST_ERROR = String(error && (error.code || error.message) || "account-refresh-failed").slice(0, 120);
