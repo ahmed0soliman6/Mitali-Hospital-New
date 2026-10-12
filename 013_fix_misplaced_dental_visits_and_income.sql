@@ -30,7 +30,7 @@ SELECT
     NOW()
 FROM public.visits_clinic vc
 LEFT JOIN public.visits_dental vd ON vd.id = vc.id
-WHERE vc.doctor_id IN (SELECT id FROM public.doctors WHERE type = 'أسنان' OR specialty = 'أسنان')
+WHERE vc.doctor_id IN (SELECT id FROM public.doctors WHERE specialty = 'أسنان' OR payload->>'type' = 'أسنان')
    OR vc.id IN (SELECT id FROM public.visits_dental)
    OR vc.exam_type IN ('حشو', 'خلع', 'تنظيف', 'تركيب', 'تبييض', 'كشف أسنان')
 ON CONFLICT (id) DO UPDATE SET
@@ -44,7 +44,7 @@ ON CONFLICT (id) DO UPDATE SET
 
 -- 2. حذف الزيارات الخاطئة من جدول عيادات خارجية visits_clinic
 DELETE FROM public.visits_clinic
-WHERE doctor_id IN (SELECT id FROM public.doctors WHERE type = 'أسنان' OR specialty = 'أسنان')
+WHERE doctor_id IN (SELECT id FROM public.doctors WHERE specialty = 'أسنان' OR payload->>'type' = 'أسنان')
    OR id IN (SELECT id FROM public.visits_dental)
    OR exam_type IN ('حشو', 'خلع', 'تنظيف', 'تركيب', 'تبييض', 'كشف أسنان');
 
@@ -55,7 +55,7 @@ SET category = 'أسنان',
 WHERE category IN ('عيادات خارجية', 'عيادة الأسنان')
   AND (
       linked_visit_id IN (SELECT id FROM public.visits_dental)
-      OR doctor_id IN (SELECT id FROM public.doctors WHERE type = 'أسنان' OR specialty = 'أسنان')
+      OR (payload->>'doctorId') IN (SELECT id FROM public.doctors WHERE specialty = 'أسنان' OR payload->>'type' = 'أسنان')
       OR description ILIKE '%أسنان%'
   );
 
@@ -63,9 +63,9 @@ WHERE category IN ('عيادات خارجية', 'عيادة الأسنان')
 DELETE FROM public.patient_file_index_clinic pfc
 WHERE NOT EXISTS (
     SELECT 1 FROM public.visits_clinic vc 
-    WHERE (vc.file_no IS NOT NULL AND vc.file_no = pfc.file_no)
-       OR (vc.phone IS NOT NULL AND vc.phone = pfc.phone)
-       OR (vc.patient IS NOT NULL AND LOWER(TRIM(vc.patient)) = LOWER(TRIM(pfc.patient)))
+    WHERE (vc.file_no IS NOT NULL AND vc.file_no <> '' AND vc.file_no = pfc.file_no)
+       OR (vc.phone IS NOT NULL AND vc.phone <> '' AND vc.phone = pfc.phone)
+       OR (vc.patient IS NOT NULL AND LOWER(TRIM(vc.patient)) = LOWER(TRIM(pfc.name)))
 );
 
 -- 5. تحديث وإعادة حساب إجمالي المدفوع والمتبقي وعدد الزيارات في فهرس مرضى الأسنان (patient_file_index_dental)
@@ -84,13 +84,14 @@ WITH dental_stats AS (
     GROUP BY computed_key
 )
 INSERT INTO public.patient_file_index_dental (
-    id, patient, phone, file_no, visits_count, total_paid, total_due, last_visit_date, updated_at
+    id, name, phone, file_no, patient_key, visits_count, total_paid, total_due, last_visit_date, updated_at
 )
 SELECT 
     CASE WHEN p_file_no IS NOT NULL THEN CONCAT('F:', p_file_no) ELSE computed_key END,
     patient_name,
     patient_phone,
     p_file_no,
+    CASE WHEN p_file_no IS NOT NULL THEN CONCAT('F:', p_file_no) ELSE computed_key END,
     v_count,
     v_paid,
     v_due,
@@ -98,6 +99,9 @@ SELECT
     NOW()
 FROM dental_stats
 ON CONFLICT (id) DO UPDATE SET
+    name = EXCLUDED.name,
+    phone = EXCLUDED.phone,
+    file_no = EXCLUDED.file_no,
     visits_count = EXCLUDED.visits_count,
     total_paid = EXCLUDED.total_paid,
     total_due = EXCLUDED.total_due,
