@@ -85,6 +85,11 @@ module.exports = async function handler(req, res) {
       const uid = String(input.uid || '');
       if (!uid) throw Object.assign(new Error('missing-uid'), { status: 400 });
       try {
+        await admin.from('staff_accounts').delete().or(`id.eq.${uid},payload->>firebaseUid.eq.${uid}`);
+      } catch (delStaffErr) {
+        console.error("Staff accounts delete error:", delStaffErr.message || delStaffErr);
+      }
+      try {
         const { error: delProfileErr } = await admin.from('profiles').delete().eq('id', uid);
         if (delProfileErr) console.error("Profiles delete error:", delProfileErr.message || delProfileErr);
       } catch (delErr) {

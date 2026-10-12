@@ -8973,15 +8973,22 @@ function renderUsersPage() {
     if (!canDelete) { showToast("⚠️ ليس لديك صلاحية حذف المستخدمين"); return; }
     const a = DB.staffAccounts.find(x => x.id === b.dataset.deluser); if (!a) return;
     if (currentUser && (currentUser.id === a.id || currentUser.firebaseUid === a.firebaseUid)) { showToast("⚠️ لا يمكنك حذف حسابك الحالي أثناء تسجيل الدخول به"); return; }
-    if (!a.firebaseUid) { showToast("⚠️ الحساب القديم غير مرتبط بالمصادقة الآمنة؛ لم يُحذف", 7000); return; }
+    const targetUid = a.firebaseUid || a.id;
+    if (!targetUid) { showToast("⚠️ لا يوجد معرف صالح لهذا الحساب", 7000); return; }
     if (!confirm(`سيُحذف حساب الدخول وملف الصلاحيات للمستخدم "${a.displayName}" من النظام. لن تتأثر بيانات المرضى أو الزيارات. هل تتابع؟`)) return;
     b.disabled = true; b.textContent = "جارٍ الحذف...";
     try {
-      const response = await window.MitaliSupabase.adminAccountRequest({ action: "delete", uid: a.firebaseUid });
-      DB.staffAccounts = DB.staffAccounts.filter(x => x.id !== a.id); await cacheLocally("staffAccounts", DB.staffAccounts); await writeSyncBaseline("staffAccounts", DB.staffAccounts);
+      const response = await window.MitaliSupabase.adminAccountRequest({ action: "delete", uid: targetUid });
+      if (window.MitaliSupabase && window.MitaliSupabase.deleteRecords && a.id) {
+        try { await window.MitaliSupabase.deleteRecords("staffAccounts", [a.id]); } catch (_dErr) {}
+      }
+      DB.staffAccounts = (DB.staffAccounts || []).filter(x => x.id !== a.id && (!a.firebaseUid || x.firebaseUid !== a.firebaseUid));
+      await cacheLocally("staffAccounts", DB.staffAccounts);
+      await writeSyncBaseline("staffAccounts", DB.staffAccounts);
       try { await refreshAccountsFromAdminApi(false); } catch (refreshError) { console.warn("Fresh account list unavailable after delete:", refreshError); }
       logActivity("حذف حساب مستخدم", "users", { username: a.username }, null);
-      showToast(response?.deleted?.alreadyRemoved ? "الحساب محذوف بالفعل؛ تم تحديث القائمة" : "تم حذف حساب الدخول وملف الصلاحيات"); route();
+      showToast(response?.deleted?.alreadyRemoved ? "الحساب محذوف بالفعل؛ تم تحديث القائمة" : "تم حذف حساب الدخول وملف الصلاحيات");
+      route();
     } catch (err) {
       console.error(err);
       if (err && (err.code === "account-not-found" || err.code === "account-already-removed")) {

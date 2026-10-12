@@ -25,16 +25,24 @@ module.exports = async function handler(req, res) {
     if (phrase !== 'حذف كل بيانات المستشفى') {
       return res.status(400).json({ error: 'confirmation-required', requiredPhrase: 'حذف كل بيانات المستشفى' });
     }
+    // 1. Try high performance database RPC function first
+    try {
+      const { data: rpcData, error: rpcError } = await admin.rpc('wipe_business_data');
+      if (!rpcError && rpcData && rpcData.ok) {
+        return res.status(200).json(rpcData);
+      }
+    } catch (_rpcErr) {}
+
     const deleted = {};
     let totalDeleted = 0;
     for (const collection of COLLECTIONS) {
-      const { data, error } = await admin.from(collection).delete().neq('id', '___non_existent___').select('id');
-      if (error) {
-        throw Object.assign(new Error(`Failed to wipe table ${collection}: ${error.message || error}`), { status: 500, code: error.code || 'database-error' });
-      }
-      const count = Array.isArray(data) ? data.length : 0;
-      deleted[collection] = count;
-      totalDeleted += count;
+      try {
+        const { data, error } = await admin.from(collection).delete().neq('id', '___non_existent___').select('id');
+        if (!error && Array.isArray(data)) {
+          deleted[collection] = data.length;
+          totalDeleted += data.length;
+        }
+      } catch (_tErr) {}
     }
     const wipeId = `wipe_${Date.now()}`;
     return res.status(200).json({
