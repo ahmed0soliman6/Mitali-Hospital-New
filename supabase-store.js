@@ -884,6 +884,23 @@
       }
       const indexRecords = Array.from(indexMap.values());
       await upsertRecords(t.indexColl, indexRecords);
+      // تنظيف السجلات المعلقة في فهرس المرضى التي لا تملك أي زيارة فعلية
+      try {
+        let existingIndexRows = [];
+        let idxFrom = 0;
+        while (true) {
+          let res = await client.from(t.indexColl).select("id").range(idxFrom, idxFrom + 999);
+          if (res.error || !res.data) break;
+          existingIndexRows = existingIndexRows.concat(res.data);
+          if (res.data.length < 1000) break;
+          idxFrom += 1000;
+        }
+        const validIds = new Set(indexRecords.map(r => String(r.id)));
+        const orphanIds = existingIndexRows.map(r => String(r.id)).filter(id => !validIds.has(id));
+        if (orphanIds.length > 0) {
+          await deleteRecords(t.indexColl, orphanIds);
+        }
+      } catch (_cleanErr) {}
       counts[t.indexColl] = indexRecords.length;
     }
     return counts;

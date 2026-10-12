@@ -2019,15 +2019,20 @@ async function loadFirestorePage(key, page = 1, options = {}) {
     page = 1;
     queryOptions = pageQueryOptions(key, page);
   }
-  function mergePageWithLocal(serverList, currentLocal) {
-    const list = Array.isArray(serverList) ? serverList.slice() : [];
+  async function mergePageWithLocal(serverList, currentLocal) {
+    let list = Array.isArray(serverList) ? serverList.slice() : [];
+    if (typeof protectRemoteSnapshotFromTombstones === "function") {
+      list = await protectRemoteSnapshotFromTombstones(key, list);
+    }
     // لا نُدمج إلا إذا كانت هذه هي الصفحة الأولى
     if (page !== 1) return list;
-    // لا نُدمج إلا إذا كانت هناك معرّفات معلّقة فعلًا
     const pendingIds = getPendingIdsForKey(key);
-    if (!pendingIds.size) return list;
+    const recentMutation = (TABLE_MUTATION_AT[key] || 0) > Date.now() - 120000;
+    if (!pendingIds.size && !recentMutation) return list;
     if (!Array.isArray(currentLocal) || !currentLocal.length) return list;
     const serverMap = new Map(list.map(r => [String(r && r.id), r]));
+    const allTombstones = typeof readSyncTombstones === "function" ? await readSyncTombstones() : {};
+    const blocked = new Set((Array.isArray(allTombstones[key]) ? allTombstones[key] : []).map(String));
     // الفلاتر النشطة: نتحقق أن السجل المعلّق يطابق نطاق التاريخ (date, month)
     const activeWhere = queryOptions.where || [];
     function recordMatchesFilters(item) {
@@ -2044,8 +2049,8 @@ async function loadFirestorePage(key, page = 1, options = {}) {
       return true;
     }
     currentLocal.forEach(item => {
-      if (item && item.id && pendingIds.has(String(item.id)) && !serverMap.has(String(item.id))) {
-        if (recordMatchesFilters(item)) {
+      if (item && item.id != null && !serverMap.has(String(item.id)) && !blocked.has(String(item.id))) {
+        if ((pendingIds.has(String(item.id)) || recentMutation) && recordMatchesFilters(item)) {
           list.unshift(item);
         }
       }
@@ -2053,7 +2058,7 @@ async function loadFirestorePage(key, page = 1, options = {}) {
     return list;
   }
   if (!options.force && pageState.pages[page]) {
-    DB[key] = mergePageWithLocal(pageState.pages[page], DB[key]);
+    DB[key] = await mergePageWithLocal(pageState.pages[page], DB[key]);
     pageState.currentPage = page;
     delete FIRESTORE_PAGE_ERRORS[key];
     return true;
@@ -2064,7 +2069,7 @@ async function loadFirestorePage(key, page = 1, options = {}) {
     pageState.hasMore[page] = !!result.hasMore;
     pageState.cursors[page + 1] = result.nextCursor || null;
     pageState.currentPage = page;
-    DB[key] = mergePageWithLocal(pageState.pages[page], DB[key]);
+    DB[key] = await mergePageWithLocal(pageState.pages[page], DB[key]);
     PAGE_DATA_LOADED_AT[key] = Date.now();
     delete FIRESTORE_PAGE_ERRORS[key];
     return true;
@@ -2138,6 +2143,12 @@ async function cascadeDeleteVisitForIncome(link) {
   if (idx > -1) DB[key].splice(idx, 1);
   logActivity("حذف زيارة بسبب حذف الوارد المرتبط", link.source.kindKey, removed || { id: link.visitId }, null);
   await persist(key);
+  if (removed && typeof syncPatientIndexOnVisitDelete === "function") {
+    await syncPatientIndexOnVisitDelete(removed, link.source.kindKey === "dental");
+  }
+  if (typeof invalidatePageState === "function") {
+    invalidatePageState(key);
+  }
   // لقطة الصفحة المخزنة لم تعد صالحة: تُقرأ من جديد عند فتح اليومية.
   if (STORAGE_MODE !== "local") getFirestorePageState(key).pages = {};
   const deletedMonth = (removed?.date || '').slice(0, 7);
@@ -4531,7 +4542,7 @@ async function syncPatientIndexRecord(rec, kindKey) {
 
   try {
     if (window.MitaliSupabase && typeof window.MitaliSupabase.savePatientToIndex === "function") {
-      await window.MitaliSupabase.savePatientToIndex({ patient: patientName, phone, fileNo, date: rec?.date, createdAt: rec?.createdAt }, isDental);
+      await window.MitaliSupabase.savePatientToIndex({ id: rec?.id, patient: patientName, phone, fileNo, date: rec?.date, createdAt: rec?.createdAt, total: rec?.total, paid: rec?.paid }, isDental);
     } else if (window.MitaliSupabase && typeof window.MitaliSupabase.upsertRecord === "function") {
       await window.MitaliSupabase.upsertRecord(indexColl, docData);
     } else if (typeof window.__legacySupabaseDisabled !== "undefined" && window.__legacySupabaseDisabled.firestore) {
@@ -4586,6 +4597,88 @@ async function syncPatientIndexRecord(rec, kindKey) {
       }
     }
   } catch (e) {}
+}
+
+// مزامنة فهرس المرضى عند حذف زيارة: حذف المريض لو لم يعد لديه زيارات، أو تحديث عداده ومجاميعه
+async function syncPatientIndexOnVisitDelete(visit, isDental) {
+  if (!visit) return;
+  const patientName = String(visit.patient || visit.name || "").replace(/\s+/g, " ").trim();
+  const phone = String(visit.phone || "").trim();
+  const fileNo = String(visit.fileNo || "").trim();
+  if (!patientName && !phone && !fileNo) return;
+
+  const isDent = !!isDental;
+  const collKey = isDent ? "patientFilesDental" : "patientFilesClinic";
+  const pKey = fileNo ? ("F:" + fileNo) : ("N:" + patientName.toLowerCase() + "|" + phone);
+  const docId = pKey.replace(/\//g, "_").slice(0, 120);
+
+  // إبطال الكاش
+  if (typeof PATIENT_FILE_VISITS_CACHE !== "undefined" && PATIENT_FILE_VISITS_CACHE[collKey]) {
+    delete PATIENT_FILE_VISITS_CACHE[collKey][docId];
+    delete PATIENT_FILE_VISITS_CACHE[collKey][pKey];
+    delete PATIENT_FILE_VISITS_CACHE[collKey][patientName];
+    if (fileNo) delete PATIENT_FILE_VISITS_CACHE[collKey][fileNo];
+  }
+  if (typeof SECTION_PATIENT_INDEX_CACHE !== "undefined") {
+    SECTION_PATIENT_INDEX_CACHE.clinic = null;
+    SECTION_PATIENT_INDEX_CACHE.dental = null;
+  }
+
+  try {
+    let remainingVisits = [];
+    if (window.MitaliSupabase && typeof window.MitaliSupabase.getPatientVisits === "function") {
+      const serverVisits = await window.MitaliSupabase.getPatientVisits(isDent ? "dental" : "clinic", { name: patientName, phone, fileNo });
+      remainingVisits = (serverVisits || []).filter(v => v && String(v.id) !== String(visit.id));
+    } else {
+      const localList = isDent ? DB.visitsDental : DB.visitsClinic;
+      remainingVisits = (localList || []).filter(v => {
+        if (!v || String(v.id) === String(visit.id)) return false;
+        const vName = String(v.patient || v.name || "").replace(/\s+/g, " ").trim();
+        const vPhone = String(v.phone || "").trim();
+        const vFileNo = String(v.fileNo || "").trim();
+        return (fileNo && vFileNo === fileNo) || (patientName && vName.toLowerCase() === patientName.toLowerCase()) || (phone && vPhone === phone);
+      });
+    }
+
+    if (remainingVisits.length === 0) {
+      if (window.MitaliSupabase && typeof window.MitaliSupabase.deleteRecords === "function") {
+        await window.MitaliSupabase.deleteRecords(collKey, [docId]);
+      }
+      if (typeof PATIENT_FILE_PAGE_STATE !== "undefined" && PATIENT_FILE_PAGE_STATE[collKey]?.pages) {
+        for (const pNum in PATIENT_FILE_PAGE_STATE[collKey].pages) {
+          const list = PATIENT_FILE_PAGE_STATE[collKey].pages[pNum];
+          if (Array.isArray(list)) {
+            const idx = list.findIndex(p => p.id === docId || (p.name && p.name === patientName));
+            if (idx > -1) list.splice(idx, 1);
+          }
+        }
+      }
+    } else {
+      remainingVisits.sort((a, b) => String(b.date || b.createdAt || "").localeCompare(String(a.date || a.createdAt || "")));
+      const last = remainingVisits[0];
+      const visitsCount = remainingVisits.length;
+      const totalPaid = remainingVisits.reduce((s, v) => s + (Number(v.paid) || 0), 0);
+      const totalDue = Math.max(0, remainingVisits.reduce((s, v) => s + Math.max(0, (Number(v.total || v.amount || 0) - (Number(v.paid) || 0))), 0));
+      const doc = {
+        id: docId,
+        patientKey: pKey,
+        name: patientName,
+        phone,
+        fileNo,
+        lastVisitDate: last.date || todayISO(),
+        lastVisitCreatedAt: last.createdAt || nowISO(),
+        updatedAt: nowISO(),
+        visitsCount,
+        totalPaid,
+        totalDue
+      };
+      if (window.MitaliSupabase && typeof window.MitaliSupabase.upsertRecord === "function") {
+        await window.MitaliSupabase.upsertRecord(collKey, doc);
+      }
+    }
+  } catch (err) {
+    console.warn("Failed to sync patient index on visit delete:", err);
+  }
 }
 
 // ======================================================================
@@ -4824,6 +4917,16 @@ function renderVisitsPage(kind) {
     // برسالة نهائية بعد اكتمال persist() الفعلي.
     state.editId = null;
     if (!editing) state.tablePage[`visits_${kind}`] = 1;
+    const filterGranKey = `visitFilterGran_${kind}`, filterValKey = `visitFilterVal_${kind}`;
+    ensurePeriodFilter(filterGranKey, filterValKey, "month");
+    const recMonth = (rec?.date || todayISO()).slice(0, 7);
+    if (state[filterGranKey] === "month") {
+      state[filterValKey] = recMonth;
+    } else if (state[filterGranKey] === "day" && rec?.date) {
+      state[filterValKey] = rec.date;
+    } else if (state[filterGranKey] === "year" && rec?.date) {
+      state[filterValKey] = rec.date.slice(0, 4);
+    }
     const visitTableKey = isDental ? "visitsDental" : "visitsClinic";
     invalidatePageState(visitTableKey);
     invalidatePageState("income");
@@ -4941,6 +5044,10 @@ function renderVisitsPage(kind) {
       if (idx > -1) list.splice(idx, 1);
       logActivity(isDental ? "حذف حالة أسنان" : "حذف زيارة", kind, removed, null);
       await persist(isDental ? "visitsDental" : "visitsClinic");
+      if (typeof syncPatientIndexOnVisitDelete === "function") {
+        await syncPatientIndexOnVisitDelete(target || removed, isDental);
+      }
+      invalidatePageState(isDental ? "visitsDental" : "visitsClinic");
       const deletedMonth = (target?.date || removed?.date || '').slice(0, 7);
       if (deletedMonth) invalidateDoctorReportsCache(deletedMonth);
       if (typeof PATIENT_FILE_VISITS_CACHE !== "undefined") {
@@ -5170,6 +5277,16 @@ function renderServiceVisitsPage(kind) {
       await syncVisitIncomeLink(rec, kind, true);
       state.editId = null;
       if (!editing) state.tablePage[`visits_${kind}`] = 1;
+      const filterGranKey = `visitFilterGran_${kind}`, filterValKey = `visitFilterVal_${kind}`;
+      ensurePeriodFilter(filterGranKey, filterValKey, "month");
+      const recMonth = (rec?.date || todayISO()).slice(0, 7);
+      if (state[filterGranKey] === "month") {
+        state[filterValKey] = recMonth;
+      } else if (state[filterGranKey] === "day" && rec?.date) {
+        state[filterValKey] = rec.date;
+      } else if (state[filterGranKey] === "year" && rec?.date) {
+        state[filterValKey] = rec.date.slice(0, 4);
+      }
       invalidatePageState(cfg.listKey);
       invalidatePageState("income");
       showToast(`💾 ${editing ? "تم تحديث السجل محليًا" : "تمت إضافة المعاملة محليًا"} — جارٍ المزامنة...`, 2400);
@@ -5235,6 +5352,7 @@ function renderServiceVisitsPage(kind) {
       if (idx > -1) list.splice(idx, 1);
       logActivity(cfg.deleteAction, kind, removed, null);
       await persist(cfg.listKey);
+      invalidatePageState(cfg.listKey);
       const deletedMonth = (target?.date || removed?.date || '').slice(0, 7);
       if (deletedMonth) invalidateDoctorReportsCache(deletedMonth);
       showToast("تم الحذف");
