@@ -705,6 +705,7 @@
     return rows.map(record);
   }
   async function savePatientToIndex(visit, isDental = false) {
+    const isDent = Boolean(isDental === true || isDental === "dental" || isDental === "visitsDental" || isDental === "أسنان" || isDental === "patientFilesDental");
     const rawName = String(visit?.patient || visit?.name || "").replace(/\s+/g, " ").trim();
     const phone = String(visit?.phone || "").trim();
     const fileNo = String(visit?.fileNo || "").trim();
@@ -712,8 +713,8 @@
     const id = (fileNo ? `F:${fileNo}` : `N:${rawName.toLowerCase()}|${phone}`).replace(/\//g, "_").slice(0, 120);
     const visitDate = visit.date || new Date().toISOString().slice(0, 10);
     const visitCreatedAt = visit.createdAt || new Date().toISOString();
-    const collectionKey = isDental ? "patientFilesDental" : "patientFilesClinic";
-    const collName = isDental ? "patient_file_index_dental" : "patient_file_index_clinic";
+    const collectionKey = isDent ? "patientFilesDental" : "patientFilesClinic";
+    const collName = isDent ? "patient_file_index_dental" : "patient_file_index_clinic";
 
     let existing = null;
     const c = config();
@@ -736,7 +737,7 @@
     let lastVisitCreatedAt = visitCreatedAt;
 
     try {
-      const patientVisits = await getPatientVisits(isDental ? "dental" : "clinic", { name: rawName, phone, fileNo });
+      const patientVisits = await getPatientVisits(isDent ? "dental" : "clinic", { name: rawName, phone, fileNo });
       const vMap = new Map((patientVisits || []).map(v => [String(v.id), v]));
       if (visit && visit.id) vMap.set(String(visit.id), { ...(vMap.get(String(visit.id)) || {}), ...visit });
       const allList = Array.from(vMap.values());

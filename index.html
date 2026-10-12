@@ -1677,6 +1677,65 @@ async function loadAll(options = {}) {
   await backfillIncomeLinks(DB.visitsLabs, "labs");
   await backfillIncomeLinks(DB.visitsRadiology, "radiology");
   if (incomeBackfillNeeded && can("income", "add")) await persist("income");
+
+  // تصحيح ذاتي: نقل أي زيارات أسنان تسربت بالخطأ إلى جدول العيادات وتصحيح بنود الوارد وفهرس المرضى
+  if (Array.isArray(DB.visitsClinic) && Array.isArray(DB.doctors)) {
+    const dentalDocIds = new Set(DB.doctors.filter(d => d.type === "أسنان" || d.specialty === "أسنان").map(d => d.id));
+    const dentalProcs = new Set(["كشف أسنان", "حشو", "خلع", "تنظيف", "تركيب", "تبييض"]);
+    const misplaced = [];
+    DB.visitsClinic = DB.visitsClinic.filter(v => {
+      const isDentalVisit = (v.doctorId && dentalDocIds.has(v.doctorId)) || dentalProcs.has(v.examType) || (Array.isArray(DB.visitsDental) && DB.visitsDental.some(d => d.id === v.id));
+      if (isDentalVisit) {
+        misplaced.push(v);
+        return false;
+      }
+      return true;
+    });
+    if (misplaced.length > 0) {
+      if (!Array.isArray(DB.visitsDental)) DB.visitsDental = [];
+      misplaced.forEach(v => {
+        const existingIdx = DB.visitsDental.findIndex(d => d.id === v.id);
+        if (existingIdx > -1) {
+          const cur = DB.visitsDental[existingIdx];
+          cur.paid = Math.max(Number(cur.paid || 0), Number(v.paid || 0));
+          cur.status = visitRemaining(cur) <= 0.009 ? "تم" : (cur.paid > 0 ? "جزئي" : "مؤجل");
+          cur.updatedAt = nowISO();
+        } else {
+          DB.visitsDental.push(v);
+        }
+      });
+      if (Array.isArray(DB.income)) {
+        DB.income.forEach(inc => {
+          const isDentalInc = misplaced.some(v => v.id === inc.linkedVisitId) || (inc.doctorId && dentalDocIds.has(inc.doctorId)) || (inc.desc && inc.desc.includes("أسنان"));
+          if (isDentalInc && inc.category === "عيادات خارجية") {
+            inc.category = "أسنان";
+          }
+        });
+      }
+      persist("visitsClinic").catch(() => {});
+      persist("visitsDental").catch(() => {});
+      persist("income").catch(() => {});
+      if (window.MitaliSupabase && typeof window.MitaliSupabase.deleteRecords === "function") {
+        window.MitaliSupabase.deleteRecords("visitsClinic", misplaced.map(v => v.id)).catch(() => {});
+      }
+      if (window.MitaliSupabase && typeof window.MitaliSupabase.deleteRecords === "function") {
+        misplaced.forEach(v => {
+          const hasClinicVisits = (DB.visitsClinic || []).some(x =>
+            (x.patient && x.patient === v.patient) ||
+            (x.fileNo && v.fileNo && x.fileNo === v.fileNo) ||
+            (x.phone && v.phone && x.phone === v.phone)
+          );
+          if (!hasClinicVisits) {
+            const indexId = (v.fileNo ? `F:${v.fileNo}` : `N:${(v.patient || "").toLowerCase()}|${v.phone || ""}`).replace(/\//g, "_").slice(0, 120);
+            window.MitaliSupabase.deleteRecords("patientFilesClinic", [indexId]).catch(() => {});
+          }
+          if (typeof window.MitaliSupabase.savePatientToIndex === "function") {
+            window.MitaliSupabase.savePatientToIndex(v, true).catch(() => {});
+          }
+        });
+      }
+    }
+  }
   if (isFirstRun && isManager) {
     ["doctors","employees","visitsClinic","visitsDental","visitsOperations","visitsLabs","visitsRadiology","income","expense","payroll"].forEach(persist);
   }
@@ -5448,7 +5507,7 @@ async function loadPatientVisitsById(patientId, kind, patientRecord) {
     }
   }
 
-  // 2. دمج أي زيارات محلية مضافة حديثًا في الذاكرة
+  // 2. دمج أي زيارات محلية مضافة حديثًا في الذاكرة مع إعطاء الأولوية للقيم الأحدث محليًا
   if (Array.isArray(DB[listKey])) {
     DB[listKey].forEach(v => {
       const vName = String(v.patient || v.name || "").trim();
@@ -5459,8 +5518,17 @@ async function loadPatientVisitsById(patientId, kind, patientRecord) {
         (pFileNo && vFileNo === pFileNo) ||
         (pPhone && vPhone === pPhone) ||
         (v.id && (v.patientId === patientId || v.fileNo === patientId));
-      if (match && !visitMap.has(v.id)) {
-        visitMap.set(v.id, { ...v, kind, kindKey: listKey });
+      if (match) {
+        const existing = visitMap.get(v.id);
+        if (!existing) {
+          visitMap.set(v.id, { ...v, kind, kindKey: listKey });
+        } else {
+          const localPaid = Number(v.paid || 0);
+          const srvPaid = Number(existing.paid || 0);
+          if (localPaid >= srvPaid || (v.updatedAt && (!existing.updatedAt || v.updatedAt >= existing.updatedAt))) {
+            visitMap.set(v.id, { ...existing, ...v, kind, kindKey: listKey, paid: Math.max(localPaid, srvPaid) });
+          }
+        }
       }
     });
   }
@@ -5513,7 +5581,31 @@ function renderPatientList(list, pageInfo = null, pageKey = "") {
     </div>`;
 }
 
+function resolveVisitMeta(kindOrKey) {
+  const k = String(kindOrKey || "").trim();
+  const lower = k.toLowerCase();
+  if (lower === "dental" || lower === "visitsdental" || k === "أسنان" || lower === "patientfilesdental" || k === "عيادة الأسنان" || k === "عيادات أسنان") {
+    return {
+      isDental: true,
+      kind: "أسنان",
+      table: "visitsDental",
+      category: "أسنان",
+      label: "أسنان",
+      pageKey: "patientFilesDental"
+    };
+  }
+  return {
+    isDental: false,
+    kind: "عيادات",
+    table: "visitsClinic",
+    category: "عيادات خارجية",
+    label: "عيادات خارجية",
+    pageKey: "patientFilesClinic"
+  };
+}
+
 function renderPatientCard(g) {
+  const cardKind = g.visits[0]?.kindKey || (g.visits[0]?.kind === "أسنان" ? "visitsDental" : "visitsClinic");
   return `
     <div class="card" style="margin-bottom:16px;">
       <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
@@ -5529,7 +5621,7 @@ function renderPatientCard(g) {
         <div class="card kpi" style="box-shadow:none; border:1px solid var(--border,#eee);">
           <div class="label">إجمالي المتبقي</div>
           <div class="value" style="color:${g.totalDue > 0 ? "var(--expense)" : "var(--ink)"};">${fmt(g.totalDue)} ج.م</div>
-          ${g.totalDue > 0.009 ? `<button class="btn sm" data-collect-total="${esc(g.key)}" style="background:var(--income,#1a7a4c); color:#fff; margin-top:8px; width:100%;">💰 تحصيل دفعة</button>` : ""}
+          ${g.totalDue > 0.009 ? `<button class="btn sm" data-collect-total="${esc(g.key)}" data-kind="${cardKind}" style="background:var(--income,#1a7a4c); color:#fff; margin-top:8px; width:100%;">💰 تحصيل دفعة</button>` : ""}
         </div>
       </div>
       ${g.nextFollowUp ? `<div style="margin-top:10px; color:#8A6300; font-weight:700; font-size:13px;">🔔 موعد متابعة قادم: ${g.nextFollowUp.nextVisitDate} (${g.nextFollowUp.kind})</div>` : ""}
@@ -5687,14 +5779,25 @@ function renderPatientFilesPage(kind) {
     }));
 
     c.querySelectorAll("[data-collect]").forEach(b => b.addEventListener("click", async () => {
-      const kindKey = b.dataset.kind;
-      const list = kindKey === "dental" ? DB.visitsDental : DB.visitsClinic;
+      const meta = resolveVisitMeta(b.dataset.kind || kind);
+      const targetTable = meta.table;
+      const list = DB[targetTable] || (DB[targetTable] = []);
       let rec = list.find(v => v.id === b.dataset.collect);
       if (!rec && patientCard.visits) {
         rec = patientCard.visits.find(v => v.id === b.dataset.collect);
         if (rec) list.push(rec);
       }
       if (!rec) return;
+
+      // إذا كان هذا السجل يتبع الأسنان وكان قد وُضع بالخطأ في عيادات خارجية سابقًا، نزيله من العيادات الخارجية
+      if (meta.isDental && Array.isArray(DB.visitsClinic)) {
+        const wrongIdx = DB.visitsClinic.findIndex(v => v.id === rec.id);
+        if (wrongIdx > -1) {
+          DB.visitsClinic.splice(wrongIdx, 1);
+          persist("visitsClinic").catch(err => console.warn("Cleanup visitsClinic failed:", err));
+        }
+      }
+
       const remaining = visitRemaining(rec);
       const input = prompt(`تحصيل دفعة من "${rec.patient || "المريض"}"\nالمبلغ المتبقي على هذه الزيارة: ${fmt(remaining)} ج.م\nادخل المبلغ المُحصَّل الآن:`, fmt(remaining));
       if (input === null) return;
@@ -5704,9 +5807,10 @@ function renderPatientFilesPage(kind) {
       const oldRec = { ...rec };
       rec.paid = (Number(rec.paid) || 0) + amount;
       rec.status = visitRemaining(rec) <= 0.009 ? "تم" : "جزئي";
-      logActivity(kindKey === "dental" ? "تحصيل دفعة أسنان" : "تحصيل دفعة عيادات", kindKey, oldRec, rec);
+      rec.updatedAt = nowISO();
+      logActivity(meta.isDental ? "تحصيل دفعة أسنان" : "تحصيل دفعة عيادات", targetTable, oldRec, rec);
 
-      // تسجيل سند إيراد تحصيل في الوارد اليومي
+      // تسجيل سند إيراد تحصيل في الوارد اليومي بالقسم الصحيح (أسنان أو عيادات خارجية)
       const incomeEntry = {
         id: uid(),
         receiptNo: "REC-" + Date.now().toString().slice(-6),
@@ -5714,9 +5818,9 @@ function renderPatientFilesPage(kind) {
         party: rec.patient || patientCard.name || "",
         phone: rec.phone || "",
         fileNo: rec.fileNo || "",
-        category: kindKey === "dental" ? "عيادة الأسنان" : "عيادات خارجية",
+        category: meta.category,
         amount: amount,
-        desc: `تحصيل دفعة من مستحق زيارة ${rec.date || ""}`,
+        desc: `تحصيل دفعة من مستحق زيارة ${meta.label} (${rec.date || ""})`,
         paymentMethod: rec.paymentMethod || "نقدي",
         receiver: currentUser?.displayName || currentUser?.username || "الموظف",
         doctorId: rec.doctorId || null,
@@ -5726,18 +5830,52 @@ function renderPatientFilesPage(kind) {
       if (!Array.isArray(DB.income)) DB.income = [];
       DB.income.push(incomeEntry);
 
+      // تحديث الزيارة وفهرس المريض في Supabase مباشرة
+      if (window.MitaliSupabase && typeof window.MitaliSupabase.upsertRecord === "function") {
+        try { await window.MitaliSupabase.upsertRecord(targetTable, rec); } catch (_e) {}
+      }
       if (window.MitaliSupabase && typeof window.MitaliSupabase.savePatientToIndex === "function") {
-        try { await window.MitaliSupabase.savePatientToIndex(rec, kindKey === "dental"); } catch (_e) {}
+        try { await window.MitaliSupabase.savePatientToIndex(rec, meta.isDental); } catch (_e) {}
+      }
+
+      // إذا كان مريض أسنان، وتسرّب له فهرس في عيادات خارجية بالخطأ بدون أي زيارات عيادات حقيقية، نزيله
+      if (meta.isDental && window.MitaliSupabase && typeof window.MitaliSupabase.deleteRecords === "function") {
+        try {
+          const hasClinicVisits = (DB.visitsClinic || []).some(x =>
+            (x.patient && x.patient === rec.patient) ||
+            (x.fileNo && rec.fileNo && x.fileNo === rec.fileNo) ||
+            (x.phone && rec.phone && x.phone === rec.phone)
+          );
+          if (!hasClinicVisits) {
+            const indexId = (rec.fileNo ? `F:${rec.fileNo}` : `N:${(rec.patient || "").toLowerCase()}|${rec.phone || ""}`).replace(/\//g, "_").slice(0, 120);
+            window.MitaliSupabase.deleteRecords("patientFilesClinic", [indexId]).catch(() => {});
+          }
+        } catch (_e) {}
       }
 
       try {
-        await persist(kindKey === "dental" ? "visitsDental" : "visitsClinic");
+        await persist(targetTable);
         await persist("income");
       } catch (err) {
         console.error("Collect payment sync push failed:", err);
       }
+
       delete PATIENT_FILE_VISITS_CACHE[pageKey][selectedKey];
-      saveToast(`تم تحصيل ${fmt(amount)} ج.م بنجاح وسُجِّل السند في الوارد اليومي`);
+      if (typeof PATIENT_FILE_PAGE_STATE !== "undefined") {
+        PATIENT_FILE_PAGE_STATE.patientFilesClinic.pages = {};
+        PATIENT_FILE_PAGE_STATE.patientFilesClinic.cursors = { 1: null };
+        PATIENT_FILE_PAGE_STATE.patientFilesDental.pages = {};
+        PATIENT_FILE_PAGE_STATE.patientFilesDental.cursors = { 1: null };
+      }
+      if (typeof SECTION_PATIENT_INDEX_CACHE !== "undefined") {
+        SECTION_PATIENT_INDEX_CACHE.clinic = null;
+        SECTION_PATIENT_INDEX_CACHE.dental = null;
+      }
+      invalidatePageState(targetTable);
+      invalidatePageState("income");
+      invalidateFinancialSummaries();
+
+      saveToast(`تم تحصيل ${fmt(amount)} ج.م بنجاح وسُجِّل السند في الوارد اليومي قسم ${meta.category}`);
       renderPatientFilesPage(kind);
     }));
 
@@ -5752,29 +5890,47 @@ function renderPatientFilesPage(kind) {
         .slice().sort((a, b) => (a.date || "").localeCompare(b.date || "") || (a.createdAt || "").localeCompare(b.createdAt || ""));
       let remainingToApply = amount;
       let visitsSettled = 0;
-      let firstTouchedDoctorId = null, firstTouchedDate = null, firstTouchedKindKey = null;
+      let firstTouchedDoctorId = null, firstTouchedDate = null, firstTouchedMeta = null;
       const touchedTables = new Set();
       for (const v of unpaidOldestFirst) {
         if (remainingToApply <= 0.009) break;
-        const kindKey = v.kindKey;
-        const list = kindKey === "dental" ? DB.visitsDental : DB.visitsClinic;
+        const meta = resolveVisitMeta(v.kindKey || v.kind || kind);
+        const list = DB[meta.table] || (DB[meta.table] = []);
         let rec = list.find(x => x.id === v.id);
         if (!rec) { list.push(v); rec = v; }
+
+        if (meta.isDental && Array.isArray(DB.visitsClinic)) {
+          const wrongIdx = DB.visitsClinic.findIndex(x => x.id === rec.id);
+          if (wrongIdx > -1) {
+            DB.visitsClinic.splice(wrongIdx, 1);
+            persist("visitsClinic").catch(err => console.warn("Cleanup visitsClinic failed:", err));
+          }
+        }
+
         const remaining = visitRemaining(rec);
         const applyNow = Math.min(remaining, remainingToApply);
         const oldRec = { ...rec };
         rec.paid = (Number(rec.paid) || 0) + applyNow;
         rec.status = visitRemaining(rec) <= 0.009 ? "تم" : "جزئي";
-        logActivity(kindKey === "dental" ? "تحصيل دفعة أسنان" : "تحصيل دفعة عيادات", kindKey, oldRec, rec);
-        touchedTables.add(kindKey === "dental" ? "visitsDental" : "visitsClinic");
-        if (window.MitaliSupabase && typeof window.MitaliSupabase.savePatientToIndex === "function") {
-          try { await window.MitaliSupabase.savePatientToIndex(rec, kindKey === "dental"); } catch (_e) {}
+        rec.updatedAt = nowISO();
+        logActivity(meta.isDental ? "تحصيل دفعة أسنان" : "تحصيل دفعة عيادات", meta.table, oldRec, rec);
+        touchedTables.add(meta.table);
+        if (window.MitaliSupabase && typeof window.MitaliSupabase.upsertRecord === "function") {
+          try { await window.MitaliSupabase.upsertRecord(meta.table, rec); } catch (_e) {}
         }
-        if (firstTouchedDoctorId === null) { firstTouchedDoctorId = rec.doctorId; firstTouchedDate = rec.date; firstTouchedKindKey = kindKey; }
+        if (window.MitaliSupabase && typeof window.MitaliSupabase.savePatientToIndex === "function") {
+          try { await window.MitaliSupabase.savePatientToIndex(rec, meta.isDental); } catch (_e) {}
+        }
+        if (firstTouchedDoctorId === null) {
+          firstTouchedDoctorId = rec.doctorId;
+          firstTouchedDate = rec.date;
+          firstTouchedMeta = meta;
+        }
         remainingToApply -= applyNow;
         if (rec.status === "تم") visitsSettled++;
       }
 
+      const effectiveMeta = firstTouchedMeta || resolveVisitMeta(kind);
       // تسجيل سند إيراد تحصيل في الوارد اليومي
       const incomeEntry = {
         id: uid(),
@@ -5783,9 +5939,9 @@ function renderPatientFilesPage(kind) {
         party: patientCard.name || "",
         phone: patientCard.phone || "",
         fileNo: patientCard.fileNos[0] || "",
-        category: firstTouchedKindKey === "dental" ? "عيادة الأسنان" : "عيادات خارجية",
+        category: effectiveMeta.category,
         amount: amount,
-        desc: `تحصيل دفعة من مستحقات قديمة (بدءًا من زيارة ${firstTouchedDate || ""})`,
+        desc: `تحصيل دفعة من مستحقات ${effectiveMeta.label} (بدءًا من زيارة ${firstTouchedDate || ""})`,
         paymentMethod: "نقدي",
         receiver: currentUser?.displayName || currentUser?.username || "الموظف",
         doctorId: firstTouchedDoctorId || null,
@@ -5801,7 +5957,21 @@ function renderPatientFilesPage(kind) {
         console.error("Collect total payment sync failed:", err);
       }
       delete PATIENT_FILE_VISITS_CACHE[pageKey][selectedKey];
-      saveToast(`تم تحصيل ${fmt(amount)} ج.م بنجاح${visitsSettled ? ` — تم سداد ${visitsSettled} زيارة بالكامل` : ""} وسُجِّل السند في الوارد اليومي`);
+      if (typeof PATIENT_FILE_PAGE_STATE !== "undefined") {
+        PATIENT_FILE_PAGE_STATE.patientFilesClinic.pages = {};
+        PATIENT_FILE_PAGE_STATE.patientFilesClinic.cursors = { 1: null };
+        PATIENT_FILE_PAGE_STATE.patientFilesDental.pages = {};
+        PATIENT_FILE_PAGE_STATE.patientFilesDental.cursors = { 1: null };
+      }
+      if (typeof SECTION_PATIENT_INDEX_CACHE !== "undefined") {
+        SECTION_PATIENT_INDEX_CACHE.clinic = null;
+        SECTION_PATIENT_INDEX_CACHE.dental = null;
+      }
+      for (const table of touchedTables) invalidatePageState(table);
+      invalidatePageState("income");
+      invalidateFinancialSummaries();
+
+      saveToast(`تم تحصيل ${fmt(amount)} ج.م بنجاح${visitsSettled ? ` — تم سداد ${visitsSettled} زيارة بالكامل` : ""} وسُجِّل السند في الوارد اليومي قسم ${effectiveMeta.category}`);
       renderPatientFilesPage(kind);
     }));
 
