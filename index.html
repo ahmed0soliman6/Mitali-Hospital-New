@@ -588,23 +588,31 @@ function fullPermissions() {
 // المدير يملك كل الصلاحيات دائمًا بغض النظر عن أي تخصيص مخزَّن.
 function getCurrentAccount() {
   if (!currentUser) return null;
-  return (DB.staffAccounts || []).find(a => a.id === currentUser.id || (currentUser.username && a.username === currentUser.username)) || null;
+  const match = (DB.staffAccounts || []).find(a => 
+    (a.id && currentUser.id && String(a.id) === String(currentUser.id)) ||
+    (a.firebaseUid && currentUser.id && String(a.firebaseUid) === String(currentUser.id)) ||
+    (a.id && currentUser.firebaseUid && String(a.id) === String(currentUser.firebaseUid)) ||
+    (a.username && currentUser.username && a.username.trim().toLowerCase() === currentUser.username.trim().toLowerCase())
+  );
+  return match || currentUser;
 }
 function can(moduleKey, actionKey) {
   if (!currentUser) return false;
-  const account = getCurrentAccount();
+  if (currentUser.role === "مدير" || currentUser.username === "admin") return true;
+  const account = getCurrentAccount() || currentUser;
   if (!account) return false;
   if (account.status === "موقوف") return false;
-  if (account.role === "مدير") return true;
+  if (account.role === "مدير" || account.username === "admin") return true;
   // الأطباء والموظفون والتصنيفات والتخصصات والخدمات: العرض (view) متاح دائمًا لجميع المستخدمين النشطين
   if (actionKey === "view" && ["doctors", "employees", "categories", "specialties", "services"].includes(moduleKey)) return true;
   return !!(account.permissions && account.permissions[moduleKey] && account.permissions[moduleKey][actionKey]);
 }
 function hasAnySettingsAccess() {
   if (!currentUser) return false;
-  const account = getCurrentAccount();
+  if (currentUser.role === "مدير" || currentUser.username === "admin") return true;
+  const account = getCurrentAccount() || currentUser;
   if (!account) return false;
-  if (account.role === "مدير") return true;
+  if (account.role === "مدير" || account.username === "admin") return true;
   const s = ["edit","backup","restore"].some(a => can("settings", a));
   const sub = ["doctors","employees","categories"].some(k => ["view","add","edit","delete"].some(a => can(k, a)));
   return s || sub;
@@ -612,9 +620,10 @@ function hasAnySettingsAccess() {
 
 function canWriteTable(key) {
   if (!currentUser) return false;
-  const account = getCurrentAccount();
+  if (currentUser.role === "مدير" || currentUser.username === "admin") return true;
+  const account = getCurrentAccount() || currentUser;
   if (!account || account.status === "موقوف") return false;
-  if (account.role === "مدير") return true;
+  if (account.role === "مدير" || account.username === "admin") return true;
   switch (key) {
     case "visitsClinic": return can("clinic", "add") || can("clinic", "edit");
     case "visitsDental": return can("dental", "add") || can("dental", "edit");
@@ -3387,8 +3396,9 @@ const NAV = [
 ];
 function isAdminUser() {
   if (!currentUser) return false;
-  const account = getCurrentAccount();
-  return !!account && account.role === "مدير" && account.status !== "موقوف";
+  if (currentUser.role === "مدير" || currentUser.username === "admin") return true;
+  const account = getCurrentAccount() || currentUser;
+  return !!account && (account.role === "مدير" || account.username === "admin") && account.status !== "موقوف";
 }
 const OUTSTANDING_PAGE_SECTION = {
   outstandingBalancesClinic: "clinic",

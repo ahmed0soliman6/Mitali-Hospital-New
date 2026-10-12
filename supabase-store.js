@@ -407,12 +407,25 @@
   }
   async function fetchJson(path, options = {}, timeoutMs = 15000) { const controller = new AbortController(), timer = setTimeout(() => controller.abort(), timeoutMs); try { const r = await fetch(apiUrl(path), { ...options, signal: controller.signal }); const body = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error(body.error || `api-${r.status}`), { code: body.error || `api-${r.status}`, status: r.status }); return body; } finally { clearTimeout(timer); } }
   async function adminRequest(payload, method = "POST") { const token = await accessToken(); return fetchJson("/api/admin/account", { method, headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: method === "GET" ? undefined : JSON.stringify(payload || {}) }); }
-  function authEmailForUsername(username) { const encoded = btoa(unescape(encodeURIComponent(String(username || "").trim().toLowerCase()))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, ""); return `u-${encoded}@accounts.mitali-hospital.internal`; }
+  function authEmailForUsername(username) { const encoded = btoa(unescape(encodeURIComponent(String(username || "").trim().toLowerCase()))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, ""); return `u-${encoded.toLowerCase()}@accounts.mitali-hospital.internal`; }
   async function signInWithUsername(username, password) {
     const c = config();
     if (c) {
-      const email = authEmailForUsername(username);
-      const { data, error } = await init().auth.signInWithPassword({ email, password });
+      const uTrim = String(username || "").trim();
+      const email = authEmailForUsername(uTrim);
+      let { data, error } = await init().auth.signInWithPassword({ email, password });
+      if (error) {
+        // Fallback: try raw btoa email without lowercase
+        const rawEncoded = btoa(unescape(encodeURIComponent(uTrim.toLowerCase()))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+        const rawEmail = `u-${rawEncoded}@accounts.mitali-hospital.internal`;
+        if (rawEmail !== email) {
+          const resRaw = await init().auth.signInWithPassword({ email: rawEmail, password });
+          if (!resRaw.error && resRaw.data?.user) {
+            data = resRaw.data;
+            error = null;
+          }
+        }
+      }
       if (error) {
         console.warn("Supabase Auth signInWithPassword:", error.message || error);
         throw Object.assign(new Error(error.message || "اسم المستخدم أو كلمة المرور غير صحيحة"), {
