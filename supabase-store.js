@@ -191,7 +191,9 @@
         doctor_id: payload.doctorId || payload.docId || null,
         doctor_name: payload.doctorName || null,
         exam_type: payload.examType || payload.type || null,
-        services: Array.isArray(payload.services) ? payload.services : [],
+        services: Array.isArray(payload.services)
+          ? payload.services
+          : (payload.services ? [payload.services] : (payload.serviceName ? [{ name: payload.serviceName, price: Number(payload.total || payload.amount || 0) }] : [])),
         total: Number(payload.total || payload.amount || 0),
         paid: Number(payload.paid || payload.paidAmount || 0),
         payment_method: payload.paymentMethod || null,
@@ -335,7 +337,17 @@
     if (row.doctor_id !== undefined && row.doctor_id !== null) res.doctorId = row.doctor_id;
     if (row.doctor_name !== undefined && row.doctor_name !== null) res.doctorName = row.doctor_name;
     if (row.exam_type !== undefined && row.exam_type !== null) res.examType = row.exam_type;
-    if (row.services !== undefined && row.services !== null) res.services = row.services;
+    if (row.services !== undefined && row.services !== null) {
+      res.services = row.services;
+      if (!res.serviceName) {
+        if (Array.isArray(row.services) && row.services.length > 0) {
+          res.serviceName = row.services.map(s => (typeof s === "string" ? s : s?.name || "")).filter(Boolean).join("، ");
+        } else if (typeof row.services === "string") {
+          res.serviceName = row.services;
+        }
+      }
+    }
+    if (payload.serviceName && !res.serviceName) res.serviceName = payload.serviceName;
     if (row.total !== undefined && row.total !== null && row.total !== "") res.total = Number(row.total);
     if (row.paid !== undefined && row.paid !== null && row.paid !== "") res.paid = Number(row.paid);
     if (row.payment_method !== undefined && row.payment_method !== null) res.paymentMethod = row.payment_method;
@@ -773,11 +785,109 @@
     };
     return upsertRecord(collectionKey, doc);
   }
+  async function searchAllPatients(term) {
+    await ready();
+    const t = String(term || "").replace(/\s+/g, " ").trim();
+    if (!t) return [];
+    const c = config();
+    if (c) {
+      try {
+        const queries = [];
+        const isNumeric = /^\d+$/.test(t);
+        const isPhone = /^[0-9+\-\s]+$/.test(t) && t.length >= 3;
+        const alt = t.startsWith("ا") ? "أ" + t.slice(1) : t.startsWith("أ") ? "ا" + t.slice(1) : null;
+
+        const indexTables = ["patient_file_index_clinic", "patient_file_index_dental"];
+        const visitTables = [
+          "visits_clinic", "visits_dental", "visits_operations", "visits_labs", "visits_radiology"
+        ];
+
+        for (const tbl of indexTables) {
+          if (isNumeric) queries.push(client.from(tbl).select("*").eq("file_no", t).limit(20));
+          if (isPhone) queries.push(client.from(tbl).select("*").ilike("phone", `%${t}%`).limit(20));
+          queries.push(client.from(tbl).select("*").ilike("name", `%${t}%`).limit(20));
+          if (alt) queries.push(client.from(tbl).select("*").ilike("name", `%${alt}%`).limit(20));
+        }
+
+        for (const tbl of visitTables) {
+          if (isNumeric) queries.push(client.from(tbl).select("id, date, file_no, patient, phone, total, paid, status").eq("file_no", t).limit(20));
+          if (isPhone) queries.push(client.from(tbl).select("id, date, file_no, patient, phone, total, paid, status").ilike("phone", `%${t}%`).limit(20));
+          queries.push(client.from(tbl).select("id, date, file_no, patient, phone, total, paid, status").ilike("patient", `%${t}%`).limit(20));
+          if (alt) queries.push(client.from(tbl).select("id, date, file_no, patient, phone, total, paid, status").ilike("patient", `%${alt}%`).limit(20));
+        }
+
+        const results = await Promise.all(queries);
+        const map = new Map();
+        for (const snap of results) {
+          if (snap.data && Array.isArray(snap.data)) {
+            for (const row of snap.data) {
+              const name = String(row.name || row.patient || "").trim();
+              const phone = String(row.phone || "").trim();
+              const fileNo = String(row.file_no || "").trim();
+              if (!name && !phone && !fileNo) continue;
+              const key = fileNo ? `F:${fileNo}` : `N:${name.toLowerCase()}|${phone}`;
+              if (!map.has(key)) {
+                map.set(key, {
+                  id: key,
+                  patientKey: key,
+                  name,
+                  phone,
+                  fileNo,
+                  visitsCount: row.visits_count != null ? Number(row.visits_count) : 1,
+                  totalPaid: row.total_paid != null ? Number(row.total_paid) : Number(row.paid || 0),
+                  totalDue: row.total_due != null ? Number(row.total_due) : Math.max(0, (Number(row.total || 0) - Number(row.paid || 0))),
+                  lastVisitDate: row.last_visit_date || row.date || ""
+                });
+              } else {
+                const ex = map.get(key);
+                if (row.visits_count != null) {
+                  ex.visitsCount = Math.max(ex.visitsCount, Number(row.visits_count));
+                  ex.totalPaid = Math.max(ex.totalPaid, Number(row.total_paid || 0));
+                  ex.totalDue = Math.max(ex.totalDue, Number(row.total_due || 0));
+                } else {
+                  ex.visitsCount++;
+                  ex.totalPaid += Number(row.paid || 0);
+                  ex.totalDue += Math.max(0, (Number(row.total || 0) - Number(row.paid || 0)));
+                }
+                const d = row.last_visit_date || row.date || "";
+                if (d && (!ex.lastVisitDate || d > ex.lastVisitDate)) ex.lastVisitDate = d;
+                if (!ex.name && name) ex.name = name;
+                if (!ex.phone && phone) ex.phone = phone;
+                if (!ex.fileNo && fileNo) ex.fileNo = fileNo;
+              }
+            }
+          }
+        }
+        return Array.from(map.values()).sort((a, b) => (b.lastVisitDate || "").localeCompare(a.lastVisitDate || ""));
+      } catch (err) {
+        console.warn("searchAllPatients failed:", err);
+      }
+    }
+    return [];
+  }
   async function getPatientVisits(kind, filter = {}) {
     await ready();
-    const coll = (kind === "dental" || kind === "أسنان" || kind === "visitsDental" || kind === "patientFilesDental")
-      ? "visits_dental"
-      : "visits_clinic";
+    const DEPT_TABLE_MAP = {
+      dental: ["visits_dental"],
+      أسنان: ["visits_dental"],
+      visitsDental: ["visits_dental"],
+      patientFilesDental: ["visits_dental"],
+      operations: ["visits_operations"],
+      عمليات: ["visits_operations"],
+      visitsOperations: ["visits_operations"],
+      labs: ["visits_labs"],
+      تحاليل: ["visits_labs"],
+      visitsLabs: ["visits_labs"],
+      radiology: ["visits_radiology"],
+      أشعة: ["visits_radiology"],
+      visitsRadiology: ["visits_radiology"],
+      clinic: ["visits_clinic", "visits_operations", "visits_labs", "visits_radiology"],
+      عيادات: ["visits_clinic", "visits_operations", "visits_labs", "visits_radiology"],
+      visitsClinic: ["visits_clinic", "visits_operations", "visits_labs", "visits_radiology"],
+      patientFilesClinic: ["visits_clinic", "visits_operations", "visits_labs", "visits_radiology"],
+      all: ["visits_clinic", "visits_dental", "visits_operations", "visits_labs", "visits_radiology"]
+    };
+    const targetColls = DEPT_TABLE_MAP[kind] || (kind ? [collectionName(kind)] : DEPT_TABLE_MAP.all);
     const name = String(filter.name || filter.patient || "").replace(/\s+/g, " ").trim();
     const phone = String(filter.phone || "").trim();
     const fileNo = String(filter.fileNo || "").trim();
@@ -785,16 +895,18 @@
     if (c) {
       try {
         const queries = [];
-        if (fileNo) {
-          queries.push(client.from(coll).select("*").eq("file_no", fileNo));
-        }
-        if (phone && phone.length >= 4) {
-          queries.push(client.from(coll).select("*").eq("phone", phone));
-        }
-        if (name) {
-          queries.push(client.from(coll).select("*").ilike("patient", `%${name}%`));
-          const alt = name.startsWith("ا") ? "أ" + name.slice(1) : name.startsWith("أ") ? "ا" + name.slice(1) : null;
-          if (alt) queries.push(client.from(coll).select("*").ilike("patient", `%${alt}%`));
+        for (const coll of targetColls) {
+          if (fileNo) {
+            queries.push(client.from(coll).select("*").eq("file_no", fileNo).then(res => ({ ...res, coll })));
+          }
+          if (phone && phone.length >= 4) {
+            queries.push(client.from(coll).select("*").eq("phone", phone).then(res => ({ ...res, coll })));
+          }
+          if (name) {
+            queries.push(client.from(coll).select("*").ilike("patient", `%${name}%`).then(res => ({ ...res, coll })));
+            const alt = name.startsWith("ا") ? "أ" + name.slice(1) : name.startsWith("أ") ? "ا" + name.slice(1) : null;
+            if (alt) queries.push(client.from(coll).select("*").ilike("patient", `%${alt}%`).then(res => ({ ...res, coll })));
+          }
         }
         if (queries.length) {
           const snaps = await Promise.all(queries);
@@ -802,7 +914,15 @@
           for (const snap of snaps) {
             if (snap.data && Array.isArray(snap.data)) {
               for (const row of snap.data) {
-                if (!map.has(row.id)) map.set(row.id, record(row));
+                if (!map.has(row.id)) {
+                  const rec = record(row);
+                  if (snap.coll === "visits_dental") { rec.section = "أسنان"; rec.kind = "أسنان"; rec.kindKey = "visitsDental"; }
+                  else if (snap.coll === "visits_operations") { rec.section = "عمليات"; rec.kind = "عمليات"; rec.kindKey = "visitsOperations"; }
+                  else if (snap.coll === "visits_labs") { rec.section = "تحاليل"; rec.kind = "تحاليل"; rec.kindKey = "visitsLabs"; }
+                  else if (snap.coll === "visits_radiology") { rec.section = "أشعة"; rec.kind = "أشعة"; rec.kindKey = "visitsRadiology"; }
+                  else { rec.section = "عيادات"; rec.kind = "عيادات"; rec.kindKey = "visitsClinic"; }
+                  map.set(row.id, rec);
+                }
               }
             }
           }
@@ -811,7 +931,6 @@
             const db = b.date || b.createdAt || "";
             return db.localeCompare(da);
           });
-          metric(coll, sorted.length);
           return sorted;
         }
       } catch (_e) {
@@ -1019,6 +1138,6 @@
   const adminWipeBusinessData = async confirmationText => fetchJson("/api/admin/data", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${await accessToken()}` }, body: JSON.stringify({ action: "wipeBusinessData", confirmationText }) });
   const adminAccountRequest = adminRequest;
   const isMockMode = () => !config();
-  window.getPatientIndexPage = getPatientIndexPage; window.searchPatientIndex = searchPatientIndex; window.savePatientToIndex = savePatientToIndex; window.getPatientVisits = getPatientVisits; window.syncPatientIndexes = syncPatientIndexes;
-  window.MitaliSupabase = window.MitaliFirebase = Object.freeze({ config: Object.freeze({ provider: "supabase" }), collections: COLLECTIONS, init, ready, waitForAuth, isMockMode, getTable, getPage, getPatientIndexPage, searchPatientIndex, savePatientToIndex, getPatientVisits, syncPatientIndexes, setTable, getValue, setValue, upsertRecord, upsertRecords, deleteRecords, subscribe, subscribePage, authEmailForUsername, signInWithUsername, changePassword, getFinancialSummary, getReportsData, getDoctorMonthReport, getMonthRecords, adminCreateAccount, configureManagerRecovery, recoverManagerPassword, adminUpdateAccount, adminListAccounts, adminDeleteAccount, adminAccountRequest, adminWipeBusinessData, signOut, authUser: currentUser, getUserProfile, ensureAdminProfile, updateOwnSecurityMetadata, getReadMetrics: () => JSON.parse(JSON.stringify(READ_METRICS)), resetReadMetrics: () => { READ_METRICS.queries = 0; READ_METRICS.documents = 0; READ_METRICS.byKey = {}; READ_METRICS.lastReadAt = null; } });
+  window.getPatientIndexPage = getPatientIndexPage; window.searchPatientIndex = searchPatientIndex; window.searchAllPatients = searchAllPatients; window.savePatientToIndex = savePatientToIndex; window.getPatientVisits = getPatientVisits; window.syncPatientIndexes = syncPatientIndexes;
+  window.MitaliSupabase = window.MitaliFirebase = Object.freeze({ config: Object.freeze({ provider: "supabase" }), collections: COLLECTIONS, init, ready, waitForAuth, isMockMode, getTable, getPage, getPatientIndexPage, searchPatientIndex, searchAllPatients, savePatientToIndex, getPatientVisits, syncPatientIndexes, setTable, getValue, setValue, upsertRecord, upsertRecords, deleteRecords, subscribe, subscribePage, authEmailForUsername, signInWithUsername, changePassword, getFinancialSummary, getReportsData, getDoctorMonthReport, getMonthRecords, adminCreateAccount, configureManagerRecovery, recoverManagerPassword, adminUpdateAccount, adminListAccounts, adminDeleteAccount, adminAccountRequest, adminWipeBusinessData, signOut, authUser: currentUser, getUserProfile, ensureAdminProfile, updateOwnSecurityMetadata, getReadMetrics: () => JSON.parse(JSON.stringify(READ_METRICS)), resetReadMetrics: () => { READ_METRICS.queries = 0; READ_METRICS.documents = 0; READ_METRICS.byKey = {}; READ_METRICS.lastReadAt = null; } });
 })();

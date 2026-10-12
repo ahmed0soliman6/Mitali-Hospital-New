@@ -1308,10 +1308,14 @@ function ensurePeriodFilter(granKey, valKey, defaultGranularity = "all") {
 }
 function periodMatches(dateStr, granularity, value) {
   if (granularity === "all") return true;
-  if (!dateStr) return false;
-  if (granularity === "day") return dateStr === value;
-  if (granularity === "year") return dateStr.slice(0, 4) === value;
-  return dateStr.slice(0, 7) === value; // شهر (الافتراضى)
+  const d = String(dateStr || "").trim();
+  if (!d) return false;
+  const cleanDate = d.slice(0, 10);
+  const cleanVal = String(value || "").trim();
+  if (!cleanVal) return true;
+  if (granularity === "day") return cleanDate === cleanVal.slice(0, 10);
+  if (granularity === "year") return cleanDate.slice(0, 4) === cleanVal.slice(0, 4);
+  return cleanDate.slice(0, 7) === cleanVal.slice(0, 7); // شهر (الافتراضى)
 }
 function periodFilterHTML(idPrefix, granularity, value, dates) {
   const monthOptions = buildMonthOptions(dates);
@@ -3152,6 +3156,63 @@ function groupPatients(visits, patientIndexList = null) {
   });
 }
 
+function getAllKnownPatients() {
+  const patientMap = new Map();
+  const allVisits = visitsFromSources(VISIT_SOURCE_DEFINITIONS);
+  allVisits.forEach(v => {
+    if (!v) return;
+    const { name, phone, fileNo } = getPatientFields(v);
+    if (!name && !phone && !fileNo) return;
+    const key = fileNo ? `F:${fileNo}` : `N:${name.toLowerCase()}|${phone}`;
+    if (!patientMap.has(key)) {
+      patientMap.set(key, { key, name, phone, fileNo, visitsCount: 1, totalPaid: Number(v.paid || 0), lastVisitDate: v.date || "" });
+    } else {
+      const p = patientMap.get(key);
+      p.visitsCount++;
+      p.totalPaid += Number(v.paid || 0);
+      if (v.date && (!p.lastVisitDate || v.date > p.lastVisitDate)) p.lastVisitDate = v.date;
+      if (!p.name && name) p.name = name;
+      if (!p.phone && phone) p.phone = phone;
+      if (!p.fileNo && fileNo) p.fileNo = fileNo;
+    }
+  });
+
+  (DB.income || []).forEach(inc => {
+    const party = String(inc.party || "").trim();
+    if (!party || party.length < 2) return;
+    const key = `N:${party.toLowerCase()}|`;
+    if (!patientMap.has(key)) {
+      patientMap.set(key, { key, name: party, phone: "", fileNo: "", visitsCount: 1, totalPaid: Number(inc.amount || 0), lastVisitDate: inc.date || "" });
+    }
+  });
+
+  for (const pageKey of ["patientFilesClinic", "patientFilesDental"]) {
+    const pState = typeof PATIENT_FILE_PAGE_STATE !== "undefined" && PATIENT_FILE_PAGE_STATE[pageKey];
+    if (pState && pState.pages) {
+      for (const pNum in pState.pages) {
+        const list = pState.pages[pNum];
+        if (Array.isArray(list)) {
+          list.forEach(p => {
+            const { name, phone, fileNo } = getPatientFields(p);
+            if (!name && !phone && !fileNo) return;
+            const key = fileNo ? `F:${fileNo}` : `N:${name.toLowerCase()}|${phone}`;
+            if (!patientMap.has(key)) {
+              patientMap.set(key, { key, name, phone, fileNo, visitsCount: Number(p.visitsCount || 1), totalPaid: Number(p.totalPaid || 0), lastVisitDate: p.lastVisitDate || "" });
+            } else {
+              const ex = patientMap.get(key);
+              if (p.visitsCount) ex.visitsCount = Math.max(ex.visitsCount, Number(p.visitsCount));
+              if (p.totalPaid) ex.totalPaid = Math.max(ex.totalPaid, Number(p.totalPaid));
+              if (p.lastVisitDate && (!ex.lastVisitDate || p.lastVisitDate > ex.lastVisitDate)) ex.lastVisitDate = p.lastVisitDate;
+            }
+          });
+        }
+      }
+    }
+  }
+
+  return Array.from(patientMap.values());
+}
+
 function ledgerRows() {
   const inc = DB.income.map(x => ({
     id: x.id, date: x.date, type: "وارد", num: x.receiptNo, desc: x.desc || x.category,
@@ -3295,11 +3356,9 @@ function visitIncomeDesc(rec, kind) {
   return `${(VISIT_KIND_META[kind] || VISIT_KIND_META.clinic).label} — ${rec.patient}${rec.fileNo ? " (ملف " + rec.fileNo + ")" : ""}`;
 }
 async function syncVisitIncomeLink(rec, kind, skipPersist) {
-  const stableReceiptNo = `V-${rec.fileNo || rec.id}`;
-  // أصلح السجلات القديمة التي فقدت linkedIncomeId دون إنشاء قيد ثانٍ عند كل
-  // تشغيل: ابحث أولًا عن القيد التلقائي ذي رقم الزيارة الثابت.
-  const linked = (rec.linkedIncomeId && DB.income.find(x => x.id === rec.linkedIncomeId))
-    || DB.income.find(x => x.receiptNo === stableReceiptNo && x.notes === "تم إنشاؤه تلقائيًا من سجل الزيارات");
+  const targetIncomeId = rec.linkedIncomeId || `visit-income-${kind}-${rec.id}`;
+  const stableReceiptNo = rec.receiptNo || `V-${kind}-${rec.id}`;
+  const linked = DB.income.find(x => x.id === targetIncomeId || (rec.linkedIncomeId && x.id === rec.linkedIncomeId));
   const paid = Number(rec.paid) || 0;
   if (paid > 0) {
     const desc = visitIncomeDesc(rec, kind);
@@ -3310,18 +3369,26 @@ async function syncVisitIncomeLink(rec, kind, skipPersist) {
       linked.amount = paid;
       linked.paymentMethod = rec.paymentMethod || linked.paymentMethod;
       if (rec.doctorId) linked.doctorId = rec.doctorId;
+      linked.linkedVisitId = rec.id;
     } else {
       const inc = {
-        id: `visit-income-${kind}-${rec.id}`, date: rec.date || todayISO(), receiptNo: stableReceiptNo,
-        party: rec.patient, category: (VISIT_KIND_META[kind] || VISIT_KIND_META.clinic).incomeCategory, desc,
-        paymentMethod: rec.paymentMethod || "نقدي", amount: paid,
-        receiver: currentUser ? currentUser.displayName : "", notes: "تم إنشاؤه تلقائيًا من سجل الزيارات",
+        id: targetIncomeId,
+        date: rec.date || todayISO(),
+        receiptNo: stableReceiptNo,
+        party: rec.patient,
+        category: (VISIT_KIND_META[kind] || VISIT_KIND_META.clinic).incomeCategory,
+        desc,
+        paymentMethod: rec.paymentMethod || "نقدي",
+        amount: paid,
+        receiver: currentUser ? (currentUser.displayName || currentUser.name || "مدير النظام") : "مدير النظام",
+        notes: "تم إنشاؤه تلقائيًا من سجل الزيارات",
         doctorId: rec.doctorId || null,
+        linkedVisitId: rec.id,
         createdAt: rec.createdAt || nowISO(),
       };
       DB.income.push(inc);
     }
-    rec.linkedIncomeId = linked ? linked.id : `visit-income-${kind}-${rec.id}`;
+    rec.linkedIncomeId = targetIncomeId;
     if (!skipPersist) await persist("income");
   } else if (linked) {
     await markSyncTombstone("income", linked.id);
@@ -4298,18 +4365,22 @@ function pageKeyDatabaseKey(pageKey) {
 // اليومية ترسم من لقطة قديمة حتى إعادة تحميل الصفحة. نطابقها هنا مع البيانات الحيّة
 // DB[key] دون المساس باللقطة نفسها ولا بترتيب السيرفر:
 // (١) تعديل → تظهر النسخة الحيّة، (٢) حذف → يُخفى السجل، (٣) إضافة → تظهر أعلى الصفحة الأولى فقط.
-function reconcileVisitPageWithLive(snapshot, live, sortedList, isFirstPage, hasMore) {
+function reconcileVisitPageWithLive(snapshot, live, sortedList, isFirstPage, hasMore, granularity, filterValue) {
   const liveById = new Map();
   for (const r of (Array.isArray(live) ? live : [])) if (r && r.id != null) liveById.set(String(r.id), r);
-  const allowed = Array.isArray(sortedList) ? new Set(sortedList.filter(r => r && r.id != null).map(r => String(r.id))) : null;
   const seen = new Set();
   const kept = [];
-  for (const r of snapshot) {
+  for (const r of (Array.isArray(snapshot) ? snapshot : [])) {
     if (!r || r.id == null) continue;
     const id = String(r.id);
     seen.add(id);
-    // الصف يظهر فقط إن كان حيًّا (لم يُحذف) ويطابق الفلتر الظاهر في الصفحة (الفترة).
-    if (liveById.has(id) && (!allowed || allowed.has(id))) kept.push(liveById.get(id));
+    const item = liveById.get(id) || r;
+    // التحقق من مطابقة فلتر الفترة إذا كان الفلتر محددًا
+    if (granularity && filterValue) {
+      if (periodMatches(item.date, granularity, filterValue)) kept.push(item);
+    } else {
+      kept.push(item);
+    }
   }
   if (!isFirstPage) return kept;
   // حماية: إن كان هناك صفحات أخرى فلا نُظهر سجلات أقدم من أقدم تاريخ في الصفحة الأولى.
@@ -4319,7 +4390,7 @@ function reconcileVisitPageWithLive(snapshot, live, sortedList, isFirstPage, has
     r && r.id != null && !seen.has(String(r.id)) && (!floor || String(r.date || "") >= floor));
   return added.concat(kept);
 }
-function firestorePageInfo(pageKey, list) {
+function firestorePageInfo(pageKey, list, granularity, filterValue) {
   const dbKey = pageKeyDatabaseKey(pageKey);
   if (STORAGE_MODE === "local" || !dbKey || !getFirestorePageState(dbKey).pages[1]) return null;
   const pageState = getFirestorePageState(dbKey);
@@ -4331,7 +4402,7 @@ function firestorePageInfo(pageKey, list) {
   const snapshotRecords = Array.isArray(pageState.pages[current]) ? pageState.pages[current].slice() : null;
   const records = snapshotRecords
     ? (/^(visits_(clinic|dental|operations|labs|radiology)|payroll|auditLog)$/.test(String(pageKey))
-        ? reconcileVisitPageWithLive(snapshotRecords, DB[dbKey], list, current === 1, !!pageState.hasMore[current])
+        ? reconcileVisitPageWithLive(snapshotRecords, DB[dbKey], list, current === 1, !!pageState.hasMore[current], granularity, filterValue)
         : snapshotRecords)
     : (Array.isArray(list) ? list : []);
   const start = records.length ? ((current - 1) * PAGE_SIZE + 1) : 0;
@@ -4756,7 +4827,7 @@ function renderVisitsPage(kind) {
   const granularity = state[granKey], filterValue = state[valKey];
   const displayList = list.filter(v => periodMatches(v.date, granularity, filterValue));
   const sortedVisits = sortByEntryOrderDesc(displayList);
-  const visitsPg = firestorePageInfo(`visits_${kind}`, sortedVisits) || paginateList(sortedVisits, `visits_${kind}`);
+  const visitsPg = firestorePageInfo(`visits_${kind}`, sortedVisits, granularity, filterValue) || paginateList(sortedVisits, `visits_${kind}`);
 
   c.innerHTML = `
     ${(editing ? canEdit : canAdd) ? `
@@ -4802,7 +4873,7 @@ function renderVisitsPage(kind) {
 
     <div class="card">
       <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
-        <div class="section-title" style="margin:0;">سجل الزيارات <span class="hint">${displayList.length} زيارة</span></div>
+        <div class="section-title" style="margin:0;">سجل الزيارات <span class="hint">${visitsPg.pageItems.length} زيارة</span></div>
         ${periodFilterHTML(`visit_${kind}`, granularity, filterValue, list.map(v => v.date))}
       </div>
       <div class="table-wrap"><table>
@@ -4811,7 +4882,7 @@ function renderVisitsPage(kind) {
           <th>الباقي</th><th>حصة المجمع</th><th>حصة الطبيب</th><th>الحالة</th><th></th>
         </tr></thead>
         <tbody>
-          ${displayList.length === 0 ? `<tr class="empty-row"><td colspan="11">لا توجد زيارات مسجّلة فى هذه الفترة</td></tr>` : ""}
+          ${visitsPg.pageItems.length === 0 ? `<tr class="empty-row"><td colspan="11">لا توجد زيارات مسجّلة فى هذه الفترة</td></tr>` : ""}
           ${visitsPg.pageItems.map(v => {
             const share = computeShare(v);
             const remaining = visitRemaining(v);
@@ -4853,19 +4924,51 @@ function renderVisitsPage(kind) {
   const fileNoInput = document.getElementById("visitFileNoInput");
   const suggestBox = document.getElementById("visitPatientSuggest");
   if (patientInput && suggestBox) {
-    const knownPatients = groupPatients(allPatientVisits());
+    let searchTimeout = null;
+    function renderSuggestions(matches) {
+      if (!matches || !matches.length) { suggestBox.style.display = "none"; suggestBox.innerHTML = ""; return; }
+      suggestBox.innerHTML = matches.map(g => {
+        const vCount = g.visitsCount || (Array.isArray(g.visits) ? g.visits.length : 1);
+        const fNo = g.fileNo || (Array.isArray(g.fileNos) ? g.fileNos[0] : "") || "";
+        return `
+          <div class="patient-suggest-item" data-name="${esc(g.name)}" data-phone="${esc(g.phone || "")}" data-fileno="${esc(fNo)}"
+            style="padding:9px 12px; cursor:pointer; border-bottom:1px solid var(--border,#eee); font-size:13.5px;">
+            <div style="font-weight:700; display:flex; justify-content:space-between; align-items:center;">
+              <span>${esc(g.name)}</span>
+              ${fNo ? `<span class="pill" style="font-size:11px; padding:2px 6px;">ملف: ${esc(fNo)}</span>` : ""}
+            </div>
+            <div class="hint" style="font-size:11.5px; margin-top:2px;">
+              ${g.phone ? "📞 " + esc(g.phone) : "بلا رقم هاتف مسجّل"} · ${vCount} زيارة سابقة
+              ${g.lastVisitDate ? ` · آخر زيارة: ${g.lastVisitDate}` : ""}
+            </div>
+          </div>`;
+      }).join("");
+      suggestBox.style.display = "block";
+    }
+
     patientInput.addEventListener("input", () => {
       const q = patientInput.value.trim().toLowerCase();
       if (q.length < 2) { suggestBox.style.display = "none"; suggestBox.innerHTML = ""; return; }
-      const matches = knownPatients.filter(g => (g.name || "").toLowerCase().includes(q)).slice(0, 6);
-      if (!matches.length) { suggestBox.style.display = "none"; suggestBox.innerHTML = ""; return; }
-      suggestBox.innerHTML = matches.map(g => `
-        <div class="patient-suggest-item" data-name="${esc(g.name)}" data-phone="${esc(g.phone)}" data-fileno="${esc(g.fileNos[0] || "")}"
-          style="padding:9px 12px; cursor:pointer; border-bottom:1px solid var(--border,#eee); font-size:13.5px;">
-          <div style="font-weight:700;">${esc(g.name)}</div>
-          <div class="hint" style="font-size:11.5px;">${g.phone ? "📞 " + esc(g.phone) : "بلا رقم هاتف مسجّل"} · ${g.visits.length} زيارة سابقة</div>
-        </div>`).join("");
-      suggestBox.style.display = "block";
+      const localMatches = getAllKnownPatients().filter(g => (g.name || "").toLowerCase().includes(q) || (g.phone && g.phone.includes(q)) || (g.fileNo && g.fileNo.includes(q))).slice(0, 8);
+      renderSuggestions(localMatches);
+
+      if (searchTimeout) clearTimeout(searchTimeout);
+      if (window.MitaliSupabase && typeof window.MitaliSupabase.searchAllPatients === "function") {
+        searchTimeout = setTimeout(async () => {
+          try {
+            const serverMatches = await window.MitaliSupabase.searchAllPatients(q);
+            if (serverMatches && serverMatches.length && patientInput.value.trim().toLowerCase() === q) {
+              const mergedMap = new Map();
+              serverMatches.forEach(m => mergedMap.set(m.fileNo ? `F:${m.fileNo}` : `N:${(m.name||'').toLowerCase()}|${m.phone||''}`, m));
+              localMatches.forEach(m => {
+                const k = m.fileNo ? `F:${m.fileNo}` : `N:${(m.name||'').toLowerCase()}|${m.phone||''}`;
+                if (!mergedMap.has(k)) mergedMap.set(k, m);
+              });
+              renderSuggestions(Array.from(mergedMap.values()).slice(0, 8));
+            }
+          } catch (_e) {}
+        }, 180);
+      }
     });
     suggestBox.addEventListener("click", (e) => {
       const item = e.target.closest("[data-name]");
@@ -4875,8 +4978,6 @@ function renderVisitsPage(kind) {
       if (fileNoInput && item.dataset.fileno) fileNoInput.value = item.dataset.fileno;
       suggestBox.style.display = "none"; suggestBox.innerHTML = "";
     });
-    // إخفاء الاقتراحات عند مغادرة الحقل - بتأخير بسيط عشان نداء الـ click على
-    // اقتراح مُختار يتنفَّذ الأول قبل ما الصندوق يختفي من تحت إصبع المستخدم.
     patientInput.addEventListener("blur", () => { setTimeout(() => { suggestBox.style.display = "none"; }, 150); });
     patientInput.addEventListener("focus", () => { if (patientInput.value.trim().length >= 2 && suggestBox.innerHTML) suggestBox.style.display = "block"; });
   }
@@ -5154,7 +5255,7 @@ function renderServiceVisitsPage(kind) {
   const granularity = state[granKey], filterValue = state[valKey];
   const displayList = list.filter(v => periodMatches(v.date, granularity, filterValue));
   const sortedVisits = sortByEntryOrderDesc(displayList);
-  const visitsPg = firestorePageInfo(`visits_${kind}`, sortedVisits) || paginateList(sortedVisits, `visits_${kind}`);
+  const visitsPg = firestorePageInfo(`visits_${kind}`, sortedVisits, granularity, filterValue) || paginateList(sortedVisits, `visits_${kind}`);
 
   c.innerHTML = `
     ${(editing ? canEdit : canAdd) ? `
@@ -5202,7 +5303,7 @@ function renderServiceVisitsPage(kind) {
 
     <div class="card">
       <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
-        <div class="section-title" style="margin:0;">سجل ${cfg.label} <span class="hint">${displayList.length} سجل</span></div>
+        <div class="section-title" style="margin:0;">سجل ${cfg.label} <span class="hint">${visitsPg.pageItems.length} سجل</span></div>
         ${periodFilterHTML(`visit_${kind}`, granularity, filterValue, list.map(v => v.date))}
       </div>
       <div class="table-wrap"><table>
@@ -5211,7 +5312,7 @@ function renderServiceVisitsPage(kind) {
           <th>الباقي</th>${cfg.doctorType ? `<th>حصة الطبيب</th>` : ""}<th>الحالة</th><th></th>
         </tr></thead>
         <tbody>
-          ${displayList.length === 0 ? `<tr class="empty-row"><td colspan="${cfg.doctorType ? 10 : 8}">لا توجد سجلات فى هذه الفترة</td></tr>` : ""}
+          ${visitsPg.pageItems.length === 0 ? `<tr class="empty-row"><td colspan="${cfg.doctorType ? 10 : 8}">لا توجد سجلات فى هذه الفترة</td></tr>` : ""}
           ${visitsPg.pageItems.map(v => {
             const remaining = visitRemaining(v);
             const pillClass = v.status === "تم" ? "paid" : v.status === "جزئي" ? "partial" : "unpaid";
@@ -5246,19 +5347,51 @@ function renderServiceVisitsPage(kind) {
   const fileNoInput = document.getElementById("svcFileNoInput");
   const suggestBox = document.getElementById("svcPatientSuggest");
   if (patientInput && suggestBox) {
-    const knownPatients = groupPatients(allPatientVisits());
+    let searchTimeout = null;
+    function renderSuggestions(matches) {
+      if (!matches || !matches.length) { suggestBox.style.display = "none"; suggestBox.innerHTML = ""; return; }
+      suggestBox.innerHTML = matches.map(g => {
+        const vCount = g.visitsCount || (Array.isArray(g.visits) ? g.visits.length : 1);
+        const fNo = g.fileNo || (Array.isArray(g.fileNos) ? g.fileNos[0] : "") || "";
+        return `
+          <div class="patient-suggest-item" data-name="${esc(g.name)}" data-phone="${esc(g.phone || "")}" data-fileno="${esc(fNo)}"
+            style="padding:9px 12px; cursor:pointer; border-bottom:1px solid var(--border,#eee); font-size:13.5px;">
+            <div style="font-weight:700; display:flex; justify-content:space-between; align-items:center;">
+              <span>${esc(g.name)}</span>
+              ${fNo ? `<span class="pill" style="font-size:11px; padding:2px 6px;">ملف: ${esc(fNo)}</span>` : ""}
+            </div>
+            <div class="hint" style="font-size:11.5px; margin-top:2px;">
+              ${g.phone ? "📞 " + esc(g.phone) : "بلا رقم هاتف مسجّل"} · ${vCount} زيارة سابقة
+              ${g.lastVisitDate ? ` · آخر زيارة: ${g.lastVisitDate}` : ""}
+            </div>
+          </div>`;
+      }).join("");
+      suggestBox.style.display = "block";
+    }
+
     patientInput.addEventListener("input", () => {
       const q = patientInput.value.trim().toLowerCase();
       if (q.length < 2) { suggestBox.style.display = "none"; suggestBox.innerHTML = ""; return; }
-      const matches = knownPatients.filter(g => (g.name || "").toLowerCase().includes(q)).slice(0, 6);
-      if (!matches.length) { suggestBox.style.display = "none"; suggestBox.innerHTML = ""; return; }
-      suggestBox.innerHTML = matches.map(g => `
-        <div class="patient-suggest-item" data-name="${esc(g.name)}" data-phone="${esc(g.phone)}" data-fileno="${esc(g.fileNos[0] || "")}"
-          style="padding:9px 12px; cursor:pointer; border-bottom:1px solid var(--border,#eee); font-size:13.5px;">
-          <div style="font-weight:700;">${esc(g.name)}</div>
-          <div class="hint" style="font-size:11.5px;">${g.phone ? "📞 " + esc(g.phone) : "بلا رقم هاتف مسجّل"} · ${g.visits.length} زيارة سابقة</div>
-        </div>`).join("");
-      suggestBox.style.display = "block";
+      const localMatches = getAllKnownPatients().filter(g => (g.name || "").toLowerCase().includes(q) || (g.phone && g.phone.includes(q)) || (g.fileNo && g.fileNo.includes(q))).slice(0, 8);
+      renderSuggestions(localMatches);
+
+      if (searchTimeout) clearTimeout(searchTimeout);
+      if (window.MitaliSupabase && typeof window.MitaliSupabase.searchAllPatients === "function") {
+        searchTimeout = setTimeout(async () => {
+          try {
+            const serverMatches = await window.MitaliSupabase.searchAllPatients(q);
+            if (serverMatches && serverMatches.length && patientInput.value.trim().toLowerCase() === q) {
+              const mergedMap = new Map();
+              serverMatches.forEach(m => mergedMap.set(m.fileNo ? `F:${m.fileNo}` : `N:${(m.name||'').toLowerCase()}|${m.phone||''}`, m));
+              localMatches.forEach(m => {
+                const k = m.fileNo ? `F:${m.fileNo}` : `N:${(m.name||'').toLowerCase()}|${m.phone||''}`;
+                if (!mergedMap.has(k)) mergedMap.set(k, m);
+              });
+              renderSuggestions(Array.from(mergedMap.values()).slice(0, 8));
+            }
+          } catch (_e) {}
+        }, 180);
+      }
     });
     suggestBox.addEventListener("click", (e) => {
       const item = e.target.closest("[data-name]");
@@ -5352,7 +5485,10 @@ function renderServiceVisitsPage(kind) {
       let pushFailedOnline = false;
       try {
         const incomeChanged = Number(rec.paid) > 0 || !!(editing && editing.linkedIncomeId);
-        const writes = [persist(cfg.listKey)];
+        const writes = [
+          persist(cfg.listKey),
+          syncPatientIndexRecord(rec, kind)
+        ];
         if (incomeChanged) writes.push(persist("income"));
         await Promise.all(writes);
       } catch (err) {
@@ -5508,29 +5644,34 @@ async function loadPatientVisitsById(patientId, kind, patientRecord) {
   }
 
   // 2. دمج أي زيارات محلية مضافة حديثًا في الذاكرة مع إعطاء الأولوية للقيم الأحدث محليًا
-  if (Array.isArray(DB[listKey])) {
-    DB[listKey].forEach(v => {
-      const vName = String(v.patient || v.name || "").trim();
-      const vPhone = String(v.phone || "").trim();
-      const vFileNo = String(v.fileNo || "").trim();
-      const match =
-        (pName && (vName === pName || vName.toLowerCase() === pName.toLowerCase())) ||
-        (pFileNo && vFileNo === pFileNo) ||
-        (pPhone && vPhone === pPhone) ||
-        (v.id && (v.patientId === patientId || v.fileNo === patientId));
-      if (match) {
-        const existing = visitMap.get(v.id);
-        if (!existing) {
-          visitMap.set(v.id, { ...v, kind, kindKey: listKey });
-        } else {
-          const localPaid = Number(v.paid || 0);
-          const srvPaid = Number(existing.paid || 0);
-          if (localPaid >= srvPaid || (v.updatedAt && (!existing.updatedAt || v.updatedAt >= existing.updatedAt))) {
-            visitMap.set(v.id, { ...existing, ...v, kind, kindKey: listKey, paid: Math.max(localPaid, srvPaid) });
+  const sourcesToCheck = kind === "أسنان"
+    ? [{ dbKey: "visitsDental", kind: "أسنان" }]
+    : VISIT_SOURCE_DEFINITIONS;
+  for (const src of sourcesToCheck) {
+    if (Array.isArray(DB[src.dbKey])) {
+      DB[src.dbKey].forEach(v => {
+        const vName = String(v.patient || v.name || "").trim();
+        const vPhone = String(v.phone || "").trim();
+        const vFileNo = String(v.fileNo || "").trim();
+        const match =
+          (pName && (vName === pName || vName.toLowerCase() === pName.toLowerCase())) ||
+          (pFileNo && vFileNo === pFileNo) ||
+          (pPhone && vPhone === pPhone) ||
+          (v.id && (v.patientId === patientId || v.fileNo === patientId));
+        if (match) {
+          const existing = visitMap.get(v.id);
+          if (!existing) {
+            visitMap.set(v.id, { ...v, kind: v.kind || src.kind, kindKey: v.kindKey || src.dbKey });
+          } else {
+            const localPaid = Number(v.paid || 0);
+            const srvPaid = Number(existing.paid || 0);
+            if (localPaid >= srvPaid || (v.updatedAt && (!existing.updatedAt || v.updatedAt >= existing.updatedAt))) {
+              visitMap.set(v.id, { ...existing, ...v, kind: v.kind || src.kind, kindKey: v.kindKey || src.dbKey, paid: Math.max(localPaid, srvPaid) });
+            }
           }
         }
-      }
-    });
+      });
+    }
   }
 
   const sorted = sortByEntryOrderDesc(Array.from(visitMap.values()));
