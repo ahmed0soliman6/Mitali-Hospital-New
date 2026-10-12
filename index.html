@@ -3857,6 +3857,66 @@ async function downloadSystemBackup() {
     showToast("⚠️ حدث خطأ أثناء تنزيل النسخة الاحتياطية");
   }
 }
+
+let SYSTEM_STORAGE_METRICS = null;
+let SYSTEM_STORAGE_METRICS_LOADING = false;
+
+async function fetchSystemStorageMetrics(force = false) {
+  if (SYSTEM_STORAGE_METRICS && !force) return SYSTEM_STORAGE_METRICS;
+  if (!window.MitaliSupabase || typeof window.MitaliSupabase.adminGetStorageMetrics !== "function") return null;
+  if (!isAdminUser()) return null;
+  try {
+    SYSTEM_STORAGE_METRICS_LOADING = true;
+    const res = await window.MitaliSupabase.adminGetStorageMetrics();
+    if (res && res.metrics) {
+      SYSTEM_STORAGE_METRICS = res.metrics;
+      renderTopAlerts();
+      return SYSTEM_STORAGE_METRICS;
+    }
+  } catch (e) {
+    console.warn("Storage metrics fetch failed:", e);
+  } finally {
+    SYSTEM_STORAGE_METRICS_LOADING = false;
+  }
+  return null;
+}
+
+function updateStorageMetricsUi(m) {
+  if (!m) return;
+  const percentLabel = document.getElementById("storagePercentLabel");
+  const progressBar = document.getElementById("storageProgressBar");
+  const usedLabel = document.getElementById("storageUsedLabel");
+  const freeLabel = document.getElementById("storageFreeLabel");
+  const banner = document.getElementById("storageWarningBanner");
+
+  if (percentLabel) percentLabel.textContent = `${m.percentUsed}% مستهلك`;
+  if (progressBar) {
+    progressBar.style.width = `${Math.min(100, m.percentUsed)}%`;
+    progressBar.style.background = m.percentUsed >= 85 ? "var(--expense)" : m.percentUsed >= 70 ? "var(--gold)" : "var(--accent)";
+  }
+  if (usedLabel) usedLabel.textContent = `المستهلك: ${m.sizeMb} ميجابايت`;
+  if (freeLabel) freeLabel.textContent = `المتبقي: ${m.freeMb} ميجابايت`;
+  if (banner) banner.style.display = m.warning ? "flex" : "none";
+}
+
+function generateArchiveYearOptions() {
+  const currentYear = new Date().getFullYear();
+  const years = new Set();
+  for (let y = currentYear; y >= currentYear - 5; y--) years.add(String(y));
+  const checkDate = d => {
+    if (!d || typeof d !== "string") return;
+    const m = d.match(/^(\d{4})/);
+    if (m) years.add(m[1]);
+  };
+  (DB.visits_clinic || []).forEach(v => checkDate(v.date || v.createdAt));
+  (DB.visits_dental || []).forEach(v => checkDate(v.date || v.createdAt));
+  (DB.income || []).forEach(i => checkDate(i.date || i.createdAt));
+  (DB.expense || []).forEach(e => checkDate(e.date || e.createdAt));
+  const sorted = Array.from(years).sort().reverse();
+  const defaultYear = sorted.find(y => Number(y) === currentYear - 1) || String(currentYear);
+  return sorted.map(y => `<option value="${esc(y)}" ${y === defaultYear ? "selected" : ""}>سنة ${esc(y)}</option>`).join("");
+}
+
 function topAlertData() {
   const today = todayISO();
   const followupUntil = localISO(new Date(Date.now() + 7 * 86400000));
@@ -3865,6 +3925,14 @@ function topAlertData() {
   try { lastBackup = Date.parse(localStorage.getItem("lastBackupAt") || "") || 0; } catch (e) { /* ignore */ }
   const backupDue = !lastBackup || (Date.now() - lastBackup > 7 * 86400000);
   const items = [];
+  if (isAdminUser() && SYSTEM_STORAGE_METRICS && SYSTEM_STORAGE_METRICS.warning) {
+    items.push({
+      icon: "⚠️",
+      title: "تنبيه سعة التخزين",
+      detail: "مساحة السحابة اقتربت من الامتلاء، يُرجى الدخول لقسم الأرشيف لتصدير وحذف سنة سابقة لتوفير مساحة مجانية.",
+      page: "settings"
+    });
+  }
   const addPageAlert = (icon, title, detail, page) => {
     if (page && isPageAccessible(page)) items.push({ icon, title, detail, page });
   };
@@ -4033,6 +4101,9 @@ function renderTopbar() {
   setupDesktopUpdateUi();
   renderDesktopUpdateIndicator();
   renderTopAlerts();
+  if (isAdminUser() && !SYSTEM_STORAGE_METRICS && !SYSTEM_STORAGE_METRICS_LOADING) {
+    fetchSystemStorageMetrics();
+  }
 }
 
 function showToast(msg, duration) {
@@ -4567,6 +4638,14 @@ function renderDashboard() {
       <div>⚠️ ${backupDays === null ? "لم يتم تنزيل أي نسخة احتياطية من هذا الجهاز بعد" : `آخر نسخة احتياطية كانت منذ ${backupDays} يومًا`} - يُفضَّل تنزيل نسخة احتياطية جديدة بانتظام لحماية بياناتك.</div>
       <button class="btn sm" id="goToBackupBtn" style="background:#C79A3E; color:#fff;">الذهاب للإعدادات</button>
     </div>` : ""}
+    ${isAdminUser() && SYSTEM_STORAGE_METRICS && SYSTEM_STORAGE_METRICS.warning ? `
+    <div class="card no-print" style="margin-bottom:16px; border:1px solid var(--expense); background:color-mix(in srgb, var(--expense) 10%, var(--card-bg)); display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+      <div style="font-weight:700; color:var(--expense); display:flex; align-items:center; gap:8px;">
+        <span style="font-size:20px;">⚠️</span>
+        <span>تنبيه سعة التخزين: مساحة السحابة اقتربت من الامتلاء، يُرجى الدخول لقسم الأرشيف لتصدير وحذف سنة سابقة لتوفير مساحة مجانية.</span>
+      </div>
+      <button class="btn danger sm" id="goToStorageArchiveBtn">قسم الأرشيف</button>
+    </div>` : ""}
     <div class="grid grid-4" style="margin-bottom:16px;">
       <div class="card kpi hero dashboard-link-card" data-dashboard-page="ledger" role="button" tabindex="0" title="فتح دفتر الخزينة">
         <div class="label">الرصيد الحالي بالخزينة</div>
@@ -4632,6 +4711,8 @@ function renderDashboard() {
   if (periodSelect) periodSelect.addEventListener("change", () => { state.dashboardPeriod = periodSelect.value; route(); });
   const goToBackupBtn = document.getElementById("goToBackupBtn");
   if (goToBackupBtn) goToBackupBtn.addEventListener("click", () => { state.page = "settings"; route(); });
+  const goToStorageArchiveBtn = document.getElementById("goToStorageArchiveBtn");
+  if (goToStorageArchiveBtn) goToStorageArchiveBtn.addEventListener("click", () => { state.page = "settings"; route(); });
   c.querySelectorAll("[data-dashboard-page]").forEach(card => {
     const openLinkedPage = (event) => {
       // لا نعتبر تغيير فترة الإيرادات نقرة على البطاقة نفسها.
@@ -7986,6 +8067,55 @@ function renderSettings() {
       </div>
     </div>` : ""}
     ${isAdminUser() ? `
+    <div class="card storage-archive-card" style="margin-bottom:18px; border-inline-start:3px solid var(--accent, #0284c7);">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:10px;">
+        <div class="section-title" style="margin-bottom:0;">📦 سعة السحابة وإدارة الأرشيف السنوي</div>
+        <button type="button" class="btn ghost sm" id="refreshStorageMetricsBtn" title="تحديث قراءة استهلاك السحابة">🔄 تحديث السعة</button>
+      </div>
+      <p class="hint" style="line-height:1.8; margin-bottom:14px;">
+        مراقبة استهلاك قاعدة بيانات Supabase (المساحة المتاحة 500 ميجابايت). عند اقتراب امتلاء السعة مع مرور السنين، يمكنك تصدير سجلات أي سنة سابقة والاحتفاظ بها كملف أرشيف آمن، ثم حذف تلك السنة من السحابة لتوفير مساحة مجانية فورًا مع بقاء ملفات وسجلات المرضى والأطباء والموظفين ثابتة ومحمية دون مساس.
+      </p>
+
+      <!-- شريط السعة -->
+      <div id="storageCapacityWidget" style="background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-weight:700; font-size:13px;">
+          <span>نسبة امتلاء القاعدة:</span>
+          <span id="storagePercentLabel">${SYSTEM_STORAGE_METRICS ? SYSTEM_STORAGE_METRICS.percentUsed + '% مستهلك' : 'جارٍ القياس...'}</span>
+        </div>
+        <div style="background:var(--line); border-radius:999px; height:12px; overflow:hidden; position:relative; margin-bottom:8px;">
+          <div id="storageProgressBar" style="height:100%; width:${SYSTEM_STORAGE_METRICS ? Math.min(100, SYSTEM_STORAGE_METRICS.percentUsed) : 0}%; background:${SYSTEM_STORAGE_METRICS && SYSTEM_STORAGE_METRICS.percentUsed >= 85 ? 'var(--expense)' : SYSTEM_STORAGE_METRICS && SYSTEM_STORAGE_METRICS.percentUsed >= 70 ? 'var(--gold)' : 'var(--accent)'}; transition:width 0.4s ease, background 0.3s ease;"></div>
+        </div>
+        <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--muted); flex-wrap:wrap; gap:6px;">
+          <span id="storageUsedLabel">المستهلك: ${SYSTEM_STORAGE_METRICS ? SYSTEM_STORAGE_METRICS.sizeMb + ' ميجابايت' : '--'}</span>
+          <span id="storageFreeLabel">المتبقي: ${SYSTEM_STORAGE_METRICS ? SYSTEM_STORAGE_METRICS.freeMb + ' ميجابايت' : '--'}</span>
+          <span>الإجمالي: 500 ميجابايت</span>
+        </div>
+
+        <div id="storageWarningBanner" style="margin-top:12px; padding:12px 14px; background:color-mix(in srgb, var(--expense) 12%, var(--card-bg)); color:var(--expense); border:1px solid var(--expense); border-radius:8px; font-weight:700; font-size:13px; line-height:1.6; display:${SYSTEM_STORAGE_METRICS && SYSTEM_STORAGE_METRICS.warning ? 'flex' : 'none'}; align-items:center; gap:10px;">
+          <span style="font-size:22px; flex-shrink:0;">⚠️</span>
+          <span>تنبيه سعة التخزين: مساحة السحابة اقتربت من الامتلاء، يُرجى الدخول لقسم الأرشيف لتصدير وحذف سنة سابقة لتوفير مساحة مجانية.</span>
+        </div>
+      </div>
+
+      <!-- قسم إدارة وتفريغ الأرشيف السنوي -->
+      <div style="border:1px solid var(--line); border-radius:10px; padding:14px; background:var(--card-bg);">
+        <div style="font-weight:800; font-size:13.5px; margin-bottom:6px;">🗄️ تفريغ وأرشفة سنة كاملة</div>
+        <p class="hint" style="line-height:1.7; margin-bottom:12px;">
+          اختر السنة المراد تصديرها أو تفريغها من السحابة. عند تفريغ السنة، تُحذف سجلات الزيارات والوارد والمنصرف الخاصة بهذه السنة فقط لتوفير مساحة بالسحابة. <strong>تظل ملفات المرضى وتاريخ فتح الملف، وبيانات الأطباء والموظفين والتخصصات والتصنيفات والإعدادات والحسابات محفوظة بالكامل دون أي مساس.</strong>
+        </p>
+        <div style="display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:14px;">
+          <label for="archiveYearSelect" style="font-weight:700; font-size:13px;">اختر السنة:</label>
+          <select id="archiveYearSelect" style="padding:6px 12px; border-radius:8px; border:1px solid var(--line); font-weight:700; min-width:120px; background:var(--card-bg); color:var(--text);">
+            ${generateArchiveYearOptions()}
+          </select>
+        </div>
+        <div style="display:flex; flex-wrap:wrap; gap:10px;">
+          <button type="button" class="btn sm" id="exportArchiveYearBtn">📥 تصدير وتحميل أرشيف السنة (JSON)</button>
+          <button type="button" class="btn danger sm" id="purgeArchiveYearBtn">🗑️ حذف سجلات هذه السنة من السحابة</button>
+        </div>
+      </div>
+    </div>` : ""}
+    ${isAdminUser() ? `
     <div class="card destructive-tools-card" style="margin-bottom:18px; border-inline-start:3px solid var(--expense);">
       <div class="section-title">🧹 حذف البيانات</div>
       <p class="hint" style="line-height:1.8; margin-bottom:12px;">هذه الأدوات منفصلة عن النسخ الاحتياطي. لا تستخدم الحذف قبل التأكد من وجود نسخة احتياطية، ولا تغلق الصفحة أثناء تنفيذ الحذف السحابي.</p>
@@ -8275,6 +8405,130 @@ function renderSettings() {
       showToast(`⚠️ ${adminAccountFailureMessage(e, "تعذر حفظ رمز الاسترداد على الخادم")}`, 7000);
     } finally { saveAdminRecoveryBtn.disabled = false; saveAdminRecoveryBtn.textContent = "حفظ رمز الاسترداد"; }
   });
+
+  const refreshStorageMetricsBtn = document.getElementById("refreshStorageMetricsBtn");
+  if (refreshStorageMetricsBtn) {
+    refreshStorageMetricsBtn.addEventListener("click", async () => {
+      refreshStorageMetricsBtn.disabled = true;
+      refreshStorageMetricsBtn.textContent = "جارٍ القياس...";
+      try {
+        const m = await fetchSystemStorageMetrics(true);
+        updateStorageMetricsUi(m);
+        showToast("تم تحديث قراءة سعة السحابة");
+      } catch (err) {
+        showToast("⚠️ تعذر قراءة سعة السحابة");
+      } finally {
+        refreshStorageMetricsBtn.disabled = false;
+        refreshStorageMetricsBtn.textContent = "🔄 تحديث السعة";
+      }
+    });
+  }
+
+  const exportArchiveYearBtn = document.getElementById("exportArchiveYearBtn");
+  if (exportArchiveYearBtn) {
+    exportArchiveYearBtn.addEventListener("click", async () => {
+      if (!isAdminUser()) { showToast("⚠️ متاح للمدير فقط"); return; }
+      if (!navigator.onLine || STORAGE_MODE !== "supabase") { showToast("⚠️ يجب الاتصال بالإنترنت لتصدير الأرشيف السحابي"); return; }
+      const yearSelect = document.getElementById("archiveYearSelect");
+      const year = yearSelect ? yearSelect.value : "";
+      if (!year) { showToast("⚠️ يرجى اختيار السنة"); return; }
+
+      exportArchiveYearBtn.disabled = true;
+      exportArchiveYearBtn.textContent = `جارٍ تجهيز أرشيف سنة ${year}...`;
+      try {
+        const res = await window.MitaliSupabase.adminExportYear(year);
+        if (!res || !res.archive) throw new Error(res?.error || "فشل تحميل الأرشيف");
+        const json = JSON.stringify(res.archive, null, 2);
+        const blob = new Blob([json], { type: "application/json;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `ارشيف_مستشفى_ميت_على_لسنة_${year}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        logActivity(`تصدير أرشيف سنة ${year}`, "settings");
+        showToast(`تم تنزيل أرشيف سنة ${year} بنجاح (${fmtInt(res.totalRecords || 0)} سجل)`, 5000);
+      } catch (err) {
+        console.error("Export archive error:", err);
+        showToast(`⚠️ فشل تصدير أرشيف سنة ${year}: ${err.message || err}`, 6000);
+      } finally {
+        exportArchiveYearBtn.disabled = false;
+        exportArchiveYearBtn.textContent = "📥 تصدير وتحميل أرشيف السنة (JSON)";
+      }
+    });
+  }
+
+  const purgeArchiveYearBtn = document.getElementById("purgeArchiveYearBtn");
+  if (purgeArchiveYearBtn) {
+    purgeArchiveYearBtn.addEventListener("click", async () => {
+      if (!isAdminUser()) { showToast("⚠️ تفريغ الأرشيف متاح للمدير فقط"); return; }
+      if (!navigator.onLine || STORAGE_MODE !== "supabase") { showToast("⚠️ يجب الاتصال بالإنترنت لتنفيذ الحذف السحابي"); return; }
+      if (PENDING_WRITES > 0 || SYNC_QUEUE_KEYS.size > 0) {
+        showToast("⚠️ توجد تغييرات معلقة. انتظر اكتمال المزامنة قبل الحذف.", 5000);
+        return;
+      }
+      const yearSelect = document.getElementById("archiveYearSelect");
+      const year = yearSelect ? yearSelect.value : "";
+      if (!year) { showToast("⚠️ يرجى اختيار السنة"); return; }
+
+      const confirmMsg = `تحذير هام:\nسيتم حذف جميع سجلات الزيارات والإيرادات والمصروفات الخاصة بسنة ${year} نهائيًا من السحابة لتوفير مساحة.\n\nتظل ملفات المرضى وتاريخ فتح الملف، وبيانات الأطباء والموظفين والإعدادات والحسابات محفوظة بالكامل دون أي مساس.\n\nهل قمت بتصدير نسخة من أرشيف سنة ${year} وتريد المتابعة؟`;
+      if (!confirm(confirmMsg)) return;
+
+      const expectedText = `حذف أرشيف سنة ${year}`;
+      const typed = prompt(`لتأكيد الحذف وتوفير المساحة، اكتب العبارة التالية حرفيًا:\n${expectedText}`);
+      if (typed !== expectedText) {
+        showToast("لم تُنفَّذ العملية: عبارة التأكيد غير صحيحة");
+        return;
+      }
+
+      if (!confirm(`تأكيد أخير: لا يمكن التراجع عن حذف سجلات سنة ${year} من السحابة. هل تبدأ الآن؟`)) return;
+
+      purgeArchiveYearBtn.disabled = true;
+      purgeArchiveYearBtn.textContent = `جارٍ تفريغ سنة ${year}...`;
+      try {
+        const res = await window.MitaliSupabase.adminPurgeYear(year, typed);
+        if (!res || !res.ok) throw new Error(res?.error || "فشل تفريغ سنة " + year);
+
+        const matchesYear = (item) => {
+          if (!item) return false;
+          const d = String(item.date || item.createdAt || "");
+          return d.startsWith(year);
+        };
+        ["visits_clinic", "visits_dental", "visits_operations", "visits_labs", "visits_radiology", "income", "expense", "lab_expenses"].forEach(k => {
+          if (Array.isArray(DB[k])) {
+            DB[k] = DB[k].filter(item => !matchesYear(item));
+          }
+        });
+        clearExactVisits();
+        if (typeof invalidateFinancialSummaries === "function") invalidateFinancialSummaries();
+        if (typeof invalidateDoctorReportsCache === "function") invalidateDoctorReportsCache();
+        for (const k of Object.keys(FIRESTORE_PAGE_STATE)) delete FIRESTORE_PAGE_STATE[k];
+        for (const k of Object.keys(PAGE_DATA_LOADED_AT)) delete PAGE_DATA_LOADED_AT[k];
+        PAGE_DATA_LOADING.clear();
+        DATA_VERSION++;
+
+        logActivity(`حذف أرشيف سنة ${year} لتوفير مساحة`, "settings");
+        showToast(`تم تفريغ سنة ${year} بنجاح وحذف ${fmtInt(res.totalDeleted || 0)} سجل. تم توفير مساحة بالسحابة.`, 7000);
+
+        const newMetrics = await fetchSystemStorageMetrics(true);
+        updateStorageMetricsUi(newMetrics);
+      } catch (err) {
+        console.error("Purge archive error:", err);
+        showToast(`⚠️ فشل حذف أرشيف سنة ${year}: ${err.message || err}`, 7000);
+      } finally {
+        purgeArchiveYearBtn.disabled = false;
+        purgeArchiveYearBtn.textContent = "🗑️ حذف سجلات هذه السنة من السحابة";
+      }
+    });
+  }
+
+  if (isAdminUser()) {
+    fetchSystemStorageMetrics(false).then(m => {
+      if (m) updateStorageMetricsUi(m);
+    });
+  }
 
   const clearBrowserDataBtn = document.getElementById("clearBrowserDataBtn");
   if (clearBrowserDataBtn) clearBrowserDataBtn.addEventListener("click", async () => {
