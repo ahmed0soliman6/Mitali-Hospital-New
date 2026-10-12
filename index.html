@@ -838,7 +838,28 @@ async function clearLocalHospitalData(options = {}) {
   }
   keysToClear.forEach(key => {
     if (Array.isArray(DB[key])) DB[key] = [];
+    if (typeof invalidatePageState === "function") invalidatePageState(key);
   });
+  if (typeof PATIENT_FILE_PAGE_STATE !== "undefined") {
+    if (PATIENT_FILE_PAGE_STATE.patientFilesClinic) {
+      PATIENT_FILE_PAGE_STATE.patientFilesClinic.pages = {};
+      PATIENT_FILE_PAGE_STATE.patientFilesClinic.cursors = { 1: null };
+    }
+    if (PATIENT_FILE_PAGE_STATE.patientFilesDental) {
+      PATIENT_FILE_PAGE_STATE.patientFilesDental.pages = {};
+      PATIENT_FILE_PAGE_STATE.patientFilesDental.cursors = { 1: null };
+    }
+  }
+  if (typeof PATIENT_FILE_VISITS_CACHE !== "undefined") {
+    PATIENT_FILE_VISITS_CACHE.patientFilesClinic = {};
+    PATIENT_FILE_VISITS_CACHE.patientFilesDental = {};
+  }
+  if (typeof SECTION_PATIENT_INDEX_CACHE !== "undefined") {
+    SECTION_PATIENT_INDEX_CACHE.clinic = null;
+    SECTION_PATIENT_INDEX_CACHE.dental = null;
+  }
+  if (typeof clearExactVisits === "function") clearExactVisits();
+  if (typeof PAGE_DATA_LOADING !== "undefined") PAGE_DATA_LOADING.clear();
   if (!businessOnly) {
     DB.settings = { ...DEFAULT_SETTINGS_AFTER_WIPE };
     DB.categories = seedCategories();
@@ -1776,7 +1797,7 @@ async function loadAll(options = {}) {
 // سياسة القراءة الاقتصادية: لا نقرأ كل جداول المستشفى عند كل إقلاع أو تنقل.
 // الكاش المحلي يعرض البيانات فورًا، ثم تُحدَّث فقط الجداول اللازمة للصفحة الحالية.
 // لا نعتبر الكاش "نسخة حديثة" إلا لمدة قصيرة؛ زر التحديث يطلب نسخة خادم صريحة.
-const READ_CACHE_TTL_MS = 5 * 60 * 1000;
+const READ_CACHE_TTL_MS = 15 * 1000;
 const CORE_BOOT_KEYS = ["staffAccounts", "settings", "doctors", "employees", "categories", "specialties"];
 // مصدر مركزي واحد لكل أقسام الزيارات؛ يمنع نسيان قسم جديد في التحميل أو التقارير أو ملفات المرضى.
 const VISIT_SOURCE_DEFINITIONS = Object.freeze([
@@ -1815,6 +1836,12 @@ function invalidatePageState(key) {
   delete FIRESTORE_PAGE_STATE[key];
   delete PAGE_DATA_LOADED_AT[key];
   delete FIRESTORE_PAGE_ERRORS[key];
+  if (typeof TABLE_MUTATION_AT !== "undefined" && TABLE_MUTATION_AT) {
+    TABLE_MUTATION_AT[key] = 0;
+  }
+  if (typeof EXACT_VISITS !== "undefined" && EXACT_VISITS && EXACT_VISITS[key]) {
+    delete EXACT_VISITS[key];
+  }
   if (typeof EXACT_VISIT_PAGES !== "undefined" && EXACT_VISIT_PAGES && EXACT_VISIT_PAGES[key]) {
     delete EXACT_VISIT_PAGES[key];
   }
@@ -2090,8 +2117,7 @@ async function loadFirestorePage(key, page = 1, options = {}) {
     // لا نُدمج إلا إذا كانت هذه هي الصفحة الأولى
     if (page !== 1) return list;
     const pendingIds = getPendingIdsForKey(key);
-    const recentMutation = (TABLE_MUTATION_AT[key] || 0) > Date.now() - 120000;
-    if (!pendingIds.size && !recentMutation) return list;
+    if (!pendingIds.size) return list;
     if (!Array.isArray(currentLocal) || !currentLocal.length) return list;
     const serverMap = new Map(list.map(r => [String(r && r.id), r]));
     const allTombstones = typeof readSyncTombstones === "function" ? await readSyncTombstones() : {};
@@ -2113,14 +2139,15 @@ async function loadFirestorePage(key, page = 1, options = {}) {
     }
     currentLocal.forEach(item => {
       if (item && item.id != null && !serverMap.has(String(item.id)) && !blocked.has(String(item.id))) {
-        if ((pendingIds.has(String(item.id)) || recentMutation) && recordMatchesFilters(item)) {
+        if (pendingIds.has(String(item.id)) && recordMatchesFilters(item)) {
           list.unshift(item);
         }
       }
     });
     return list;
   }
-  if (!options.force && pageState.pages[page]) {
+  const shouldFetchServer = options.force || (STORAGE_MODE === "supabase" && !options.preferCache) || !pageState.pages[page];
+  if (!shouldFetchServer && pageState.pages[page]) {
     DB[key] = await mergePageWithLocal(pageState.pages[page], DB[key]);
     pageState.currentPage = page;
     delete FIRESTORE_PAGE_ERRORS[key];
@@ -2567,7 +2594,7 @@ function mergeRemoteSnapshot(key, remoteValue, blockedIds = new Set()) {
   const remote = remoteValue || [];
   const localMap = new Map(local.filter(r => r && r.id != null).map(r => [r.id, r]));
   const remoteMap = new Map(remote.filter(r => r && r.id != null).map(r => [r.id, r]));
-  const recentMutation = (TABLE_MUTATION_AT[key] || 0) > Date.now() - 120000;
+  const pendingIds = typeof getPendingIdsForKey === "function" ? getPendingIdsForKey(key) : new Set();
   const merged = remote.map(remoteRecord => {
     const localRecord = localMap.get(remoteRecord.id);
     if (!localRecord) return remoteRecord;
@@ -2575,15 +2602,16 @@ function mergeRemoteSnapshot(key, remoteValue, blockedIds = new Set()) {
     const remoteTime = remoteRecord.updatedAt || "";
     // لا تسمح لنسخة سحابية أقدم أن تمحو تعديل الجهاز الحالي.
     if (localTime && remoteTime && localTime > remoteTime) return localRecord;
-    if (recentMutation && (!localTime || !remoteTime) && !syncRecordsEqual(key, localRecord, remoteRecord)) return localRecord;
+    if (pendingIds.has(String(remoteRecord.id)) && (!localTime || !remoteTime) && !syncRecordsEqual(key, localRecord, remoteRecord)) return localRecord;
     return remoteRecord;
   });
-  // Snapshot ناقصة لا تعني حذفًا أثناء Mutation/Outbox؛ خارج نافذة الحماية
-  // نثق باللقطة الحالية، مع بقاء Tombstone هو الحذف الصريح الوحيد.
-  if (recentMutation || SYNC_QUEUE_KEYS.has(String(key))) {
+  // Snapshot ناقصة: لا نُبقي سجلاً محلياً غير موجود على السحابة إلا إذا كان معلقاً قيد الرفع الفعلي
+  if (pendingIds && pendingIds.size > 0) {
     for (const localRecord of local) {
       if (localRecord && localRecord.id != null && !remoteMap.has(localRecord.id)
-        && !blockedIds.has(String(localRecord.id))) merged.push(localRecord);
+        && !blockedIds.has(String(localRecord.id)) && pendingIds.has(String(localRecord.id))) {
+        merged.push(localRecord);
+      }
     }
   }
   return merged;
@@ -2650,6 +2678,7 @@ async function persist(key) {
   } finally {
     PENDING_WRITES--;
     if (key === "income" || key === "expense") invalidateFinancialSummaries();
+    if (typeof invalidatePageState === "function") invalidatePageState(key);
     DATA_VERSION++;
     renderStorageIndicator();
   }
