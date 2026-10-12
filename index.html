@@ -2776,9 +2776,11 @@ function clinicFeeForDoctor(doctor, examType) {
 function percentShareForExam(doctor, examType) {
   if (!doctor) return { doc: 0, clinic: 0 };
   const isFollowup = examType === "متابعة";
+  const docVal = Number(isFollowup ? (doctor.docFollowupPct ?? doctor.docPct) : doctor.docPct) || 0;
+  const clinicVal = Number(isFollowup ? (doctor.clinicFollowupPct ?? doctor.clinicPct) : doctor.clinicPct) || 0;
   return {
-    doc: Number(isFollowup ? (doctor.docFollowupPct ?? doctor.docPct) : doctor.docPct) || 0,
-    clinic: Number(isFollowup ? (doctor.clinicFollowupPct ?? doctor.clinicPct) : doctor.clinicPct) || 0,
+    doc: docVal > 1 ? docVal / 100 : docVal,
+    clinic: clinicVal > 1 ? clinicVal / 100 : clinicVal,
   };
 }
 function computeShare(visit) {

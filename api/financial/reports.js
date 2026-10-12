@@ -46,7 +46,10 @@ async function rows(db, table, month) {
       feeMode: x.fee_mode || p.feeMode || 'percent',
       docPct: x.doc_pct != null && x.doc_pct !== '' ? Number(x.doc_pct) : (p.docPct != null ? Number(p.docPct) : 0),
       clinicPct: x.clinic_pct != null && x.clinic_pct !== '' ? Number(x.clinic_pct) : (p.clinicPct != null ? Number(p.clinicPct) : 0),
+      docFollowupPct: x.doc_followup_pct != null && x.doc_followup_pct !== '' ? Number(x.doc_followup_pct) : (p.docFollowupPct != null ? Number(p.docFollowupPct) : undefined),
+      clinicFollowupPct: x.clinic_followup_pct != null && x.clinic_followup_pct !== '' ? Number(x.clinic_followup_pct) : (p.clinicFollowupPct != null ? Number(p.clinicFollowupPct) : undefined),
       checkupClinicFee: x.checkup_clinic_fee != null && x.checkup_clinic_fee !== '' ? Number(x.checkup_clinic_fee) : (p.checkupClinicFee != null ? Number(p.checkupClinicFee) : 0),
+      dailyFixedAmount: x.daily_fixed_amount != null && x.daily_fixed_amount !== '' ? Number(x.daily_fixed_amount) : (p.dailyFixedAmount != null ? Number(p.dailyFixedAmount) : 0),
       specialty: x.specialty || p.specialty || '',
       type: x.type || p.type || '',
       status: x.status || p.status || '',
@@ -58,12 +61,21 @@ async function rows(db, table, month) {
 function share(v, d) {
   const paid = Number(v.paid) || 0;
   if (!d) return { doc: 0, clinic: paid };
-  if ((d.feeMode || '') === 'fixed_visit') {
+  const type = d.type || (d.specialty === 'أسنان' ? 'أسنان' : (d.specialty === 'تحاليل' ? 'تحاليل' : (d.specialty === 'اشعة' || d.specialty === 'أشعة' ? 'أشعة' : 'عيادات')));
+  const isPercent = type === 'أسنان' || (d.feeMode || '') === 'percent';
+  if (!isPercent && (d.feeMode || '') === 'fixed_visit') {
     const c = Math.min(Math.max(Number(v.clinicFeeSnapshot ?? d.checkupClinicFee) || 0, 0), paid);
     return { doc: paid - c, clinic: c };
   }
-  const dp = Number(d.docPct || 0), cp = Number(d.clinicPct || 0);
-  return { doc: paid * dp / 100, clinic: paid * cp / 100 };
+  if (!isPercent && (d.feeMode || '') === 'fixed_daily') {
+    return { doc: 0, clinic: paid };
+  }
+  const isFollowup = v.examType === 'متابعة';
+  const dpRaw = Number(isFollowup ? (d.docFollowupPct ?? d.docPct) : d.docPct) || 0;
+  const cpRaw = Number(isFollowup ? (d.clinicFollowupPct ?? d.clinicPct) : d.clinicPct) || 0;
+  const docRatio = dpRaw > 1 ? dpRaw / 100 : dpRaw;
+  const clinicRatio = cpRaw > 1 ? cpRaw / 100 : cpRaw;
+  return { doc: paid * docRatio, clinic: paid * clinicRatio };
 }
 
 module.exports = async function handler(req, res) {
@@ -91,27 +103,68 @@ module.exports = async function handler(req, res) {
 
     const byDoctor = doctors.map(d => {
       const vs = visitRows.filter(v => String(v.doctorId || '') === String(d.id));
-      const amount = vs.reduce((s, v) => s + (Number(v.paid) || 0), 0);
-      const sh = vs.reduce((s, v) => {
-        const x = share(v, d);
-        return { doc: s.doc + x.doc, clinic: s.clinic + x.clinic };
-      }, { doc: 0, clinic: 0 });
+      const docIncome = income.filter(r => String(r.doctorId || '') === String(d.id));
+      const amount = vs.reduce((s, v) => s + (Number(v.paid) || 0), 0) + docIncome.reduce((s, r) => s + (Number(r.amount) || 0), 0);
       const doctorType = d.type || (d.specialty === 'أسنان' ? 'أسنان' : (d.specialty === 'تحاليل' ? 'تحاليل' : (d.specialty === 'اشعة' || d.specialty === 'أشعة' ? 'أشعة' : 'عيادات')));
+      const isPercent = doctorType === 'أسنان' || (d.feeMode || '') === 'percent';
+      const mode = isPercent ? 'percent' : (d.feeMode || 'fixed_visit');
+
+      let docShare = 0;
+      let clinicShare = 0;
+
+      if (mode === 'fixed_daily') {
+        const activeDays = new Set([
+          ...vs.map(v => v.date).filter(Boolean),
+          ...docIncome.map(r => r.date).filter(Boolean)
+        ]);
+        const dailyRate = Number(d.dailyFixedAmount || d.daily_fixed_amount) || 0;
+        docShare = Math.max(0, dailyRate) * activeDays.size;
+        clinicShare = amount - docShare;
+      } else {
+        const visitShares = vs.reduce((s, v) => {
+          const x = share(v, d);
+          return { doc: s.doc + x.doc, clinic: s.clinic + x.clinic };
+        }, { doc: 0, clinic: 0 });
+
+        const incomeShares = docIncome.reduce((s, r) => {
+          const amt = Number(r.amount) || 0;
+          if (r.docShare != null && r.clinicShare != null) {
+            return { doc: s.doc + (Number(r.docShare) || 0), clinic: s.clinic + (Number(r.clinicShare) || 0) };
+          }
+          if (mode === 'fixed_visit') return { doc: s.doc, clinic: s.clinic + amt };
+          const dpRaw = Number(d.docPct) || 0;
+          const cpRaw = Number(d.clinicPct) || 0;
+          const docRatio = dpRaw > 1 ? dpRaw / 100 : dpRaw;
+          const clinicRatio = cpRaw > 1 ? cpRaw / 100 : cpRaw;
+          return { doc: s.doc + (amt * docRatio), clinic: s.clinic + (amt * clinicRatio) };
+        }, { doc: 0, clinic: 0 });
+
+        docShare = visitShares.doc + incomeShares.doc;
+        clinicShare = visitShares.clinic + incomeShares.clinic;
+      }
+
+      const docLabs = labs.filter(x => String(x.doctorId || x.doctor_id || '') === String(d.id));
+      const labExpense = docLabs.reduce((s, x) => s + (Number(x.amount) || 0), 0);
+      const netRevenue = amount - labExpense;
+      clinicShare = netRevenue - docShare;
+
       return {
         doctorId: d.id,
         name: d.name,
         specialty: d.specialty || '',
         type: doctorType,
-        count: vs.length,
+        count: vs.length + docIncome.length,
         rev: amount,
         grossRevenue: amount,
-        doc: sh.doc,
-        docShare: sh.doc,
-        clinic: sh.clinic,
-        clinicShare: sh.clinic,
-        mode: d.feeMode || 'percent'
+        labExpense,
+        netRevenue,
+        doc: docShare,
+        docShare: docShare,
+        clinic: clinicShare,
+        clinicShare: clinicShare,
+        mode
       };
-    }).filter(x => x.count).sort((a, b) => b.rev - a.rev);
+    }).filter(x => x.count > 0 || (x.labExpense || 0) > 0).sort((a, b) => b.rev - a.rev);
 
     const totalIncome = income.reduce((s, x) => s + (Number(x.amount || x.total || 0) || 0), 0);
     const totalExpense = expense.reduce((s, x) => s + (Number(x.amount || x.total || 0) || 0), 0);
