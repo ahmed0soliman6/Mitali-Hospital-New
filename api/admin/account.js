@@ -68,13 +68,14 @@ module.exports = async function handler(req, res) {
     if (req.method === 'GET') {
       const { admin } = await requireManager(req);
       try {
+        const { data: profData, error: profErr } = await admin.from('profiles').select('*').order('created_at');
+        if (!profErr && Array.isArray(profData) && profData.length > 0) {
+          return json(res, 200, { accounts: profData.map(publicProfile) });
+        }
         const { data: staffData, error: staffErr } = await admin.from('staff_accounts').select('*').order('created_at');
         if (!staffErr && Array.isArray(staffData) && staffData.length > 0) {
           return json(res, 200, { accounts: staffData.map(publicProfile) });
         }
-        const { data, error } = await admin.from('profiles').select('*').order('created_at');
-        if (error) throw error;
-        if (Array.isArray(data)) return json(res, 200, { accounts: data.map(publicProfile) });
       } catch (err) {
         console.error("Profiles fetch error:", err.message || err);
         if (isProd) throw Object.assign(new Error(err.message || 'profiles-fetch-failed'), { status: 500 });

@@ -8721,16 +8721,8 @@ async function refreshAccountsFromAdminApi(shouldRoute = true, force = false) {
           window.MitaliSupabase.adminListAccounts(),
           new Promise((_, reject) => setTimeout(() => reject(Object.assign(new Error("admin-accounts-refresh-timeout"), { code: "admin-accounts-refresh-timeout" })), ADMIN_ACCOUNTS_REFRESH_TIMEOUT_MS))
         ]);
-        if (!Array.isArray(accounts)) throw new Error("invalid-admin-accounts-response");
-        if (accounts.length > 0) {
-          const remoteMap = new Map(accounts.map(a => [a.username || a.id, a]));
-          const currentList = Array.isArray(DB.staffAccounts) ? DB.staffAccounts : [];
-          const merged = accounts.slice();
-          currentList.forEach(localAcc => {
-            const key = localAcc.username || localAcc.id;
-            if (!remoteMap.has(key)) merged.push(localAcc);
-          });
-          DB.staffAccounts = merged;
+        if (Array.isArray(accounts) && accounts.length > 0) {
+          DB.staffAccounts = accounts;
         }
         ADMIN_ACCOUNTS_REFRESH_LAST_SUCCESS_AT = Date.now();
         await cacheLocally("staffAccounts", DB.staffAccounts);
