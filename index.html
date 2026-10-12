@@ -1848,6 +1848,13 @@ function invalidatePageState(key) {
   if (typeof EXACT_VISIT_CACHE !== "undefined" && EXACT_VISIT_CACHE && EXACT_VISIT_CACHE[key]) {
     delete EXACT_VISIT_CACHE[key];
   }
+  if (typeof REPORTS_CACHE !== "undefined") {
+    for (const k of Object.keys(REPORTS_CACHE)) delete REPORTS_CACHE[k];
+  }
+  if (typeof REPORTS_API_DATA !== "undefined") {
+    REPORTS_API_DATA = null;
+    REPORTS_LAST_PARAMS = null;
+  }
 }
 const FINANCIAL_SUMMARY_CACHE = Object.create(null);
 const FINANCIAL_SUMMARY_LOADING = new Map();
@@ -7502,7 +7509,7 @@ let REPORTS_API_LOADING = false;
 let REPORTS_API_ERROR = null;
 let REPORTS_LAST_PARAMS = null;
 
-async function loadReportsDataIfNeeded() {
+async function loadReportsDataIfNeeded(options = {}) {
   const range = state.reportMonthsRange || 6;
   const closingMonth = state.closingMonth || todayISO().slice(0, 7);
   const annualYear = state.annualReportYear || String(new Date().getFullYear());
@@ -7511,13 +7518,14 @@ async function loadReportsDataIfNeeded() {
   const includeAnnual = state.showAnnualReport ? "1" : "0";
   const paramKey = `${range}|${closingMonth}|${annualYear}|${doctorMonth}|${includeAnnual}`;
 
-  if (REPORTS_CACHE[paramKey]) {
-    REPORTS_API_DATA = REPORTS_CACHE[paramKey];
+  const cached = REPORTS_CACHE[paramKey];
+  if (!options.force && cached && cached.at && (Date.now() - cached.at < 15000)) {
+    REPORTS_API_DATA = cached.data;
     REPORTS_LAST_PARAMS = paramKey;
     REPORTS_API_ERROR = null;
     return REPORTS_API_DATA;
   }
-  if (REPORTS_API_DATA && REPORTS_LAST_PARAMS === paramKey && !REPORTS_API_LOADING) {
+  if (!options.force && REPORTS_API_DATA && REPORTS_LAST_PARAMS === paramKey && !REPORTS_API_LOADING) {
     return REPORTS_API_DATA;
   }
   if (REPORTS_API_LOADING) return null;
@@ -7528,7 +7536,7 @@ async function loadReportsDataIfNeeded() {
     const fetcher = (window.MitaliSupabase && window.MitaliSupabase.getReportsData);
     if (!fetcher) throw new Error("getReportsData is not available");
     const data = await fetcher({ range, closingMonth, annualYear, doctorMonth, includeAnnual });
-    REPORTS_CACHE[paramKey] = data;
+    REPORTS_CACHE[paramKey] = { data, at: Date.now() };
     if (data && Array.isArray(data.byDoctor) && doctorMonth) {
       DOCTOR_REPORTS_CACHE[doctorMonth] = {
         data: {
@@ -7731,6 +7739,13 @@ function renderReports() {
     payrollDue: 0
   };
 
+  const calculatedDocShare = (byDoctor && byDoctor.length)
+    ? byDoctor.reduce((s, r) => s + (Number(r.docShare ?? r.doc) || 0), 0)
+    : Number(closing.docShare || 0);
+  const calculatedClinicShare = (closing.visitRevenue > 0 && calculatedDocShare > 0)
+    ? (closing.visitRevenue - calculatedDocShare)
+    : Number(closing.clinicShare || 0);
+
   const monthNames = ["يناير","فبراير","مارس","أبريل","مايو","يونيو","يوليو","أغسطس","سبتمبر","أكتوبر","نوفمبر","ديسمبر"];
   const closingMonthName = monthNames[Number(closing.ym.slice(5, 7)) - 1] || "";
   const closingYear = closing.ym.slice(0, 4);
@@ -7813,7 +7828,7 @@ function renderReports() {
         <div class="grid grid-4" style="gap:10px;">
           <div class="card kpi" style="box-shadow:none; border:1px solid var(--border,#eee);"><div class="label">زيارات الشهر (كل الأقسام)</div><div class="value">${fmtInt(closing.visitCount)}</div></div>
           <div class="card kpi" style="box-shadow:none; border:1px solid var(--border,#eee);"><div class="label">إيراد الزيارات المحصَّل</div><div class="value" style="color:#2A6DA6;">${fmt(closing.visitRevenue)} ج.م</div></div>
-          <div class="card kpi" style="box-shadow:none; border:1px solid var(--border,#eee);" title="حصة المجمع والأطباء من كل الزيارات (كشف ومتابعة) لكل أنواع الأطباء"><div class="label">حصة المجمع / حصة الأطباء</div><div class="value" style="font-size:14px;">${fmt(closing.clinicShare)} / ${fmt(closing.docShare)}</div></div>
+          <div class="card kpi" style="box-shadow:none; border:1px solid var(--border,#eee);" title="حصة المجمع والأطباء من كل الزيارات (كشف ومتابعة) لكل أنواع الأطباء"><div class="label">حصة المجمع / حصة الأطباء</div><div class="value" style="font-size:14px;">${fmt(calculatedClinicShare)} / ${fmt(calculatedDocShare)}</div></div>
           <div class="card kpi" style="box-shadow:none; border:1px solid var(--border,#eee);"><div class="label">مرتبات الشهر (مدفوع / مستحق)</div><div class="value" style="font-size:14px;">${fmt(closing.payrollPaid)} / ${fmt(closing.payrollDue)}</div></div>
         </div>
       </div>

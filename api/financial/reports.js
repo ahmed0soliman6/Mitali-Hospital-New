@@ -191,6 +191,10 @@ module.exports = async function handler(req, res) {
       loaded: false
     };
 
+    const totalDocShare = byDoctor.reduce((s, x) => s + x.doc, 0);
+    const assignedClinicShare = byDoctor.reduce((s, x) => s + x.clinic, 0);
+    const totalClinicShare = visitRevenue > 0 ? (visitRevenue - totalDocShare) : assignedClinicShare;
+
     return res.status(200).json({
       range: req.query?.range || '6',
       closingMonth: month,
@@ -204,8 +208,8 @@ module.exports = async function handler(req, res) {
         ym: month,
         visitCount: visitRows.length,
         visitRevenue,
-        docShare: byDoctor.reduce((s, x) => s + x.doc, 0),
-        clinicShare: byDoctor.reduce((s, x) => s + x.clinic, 0),
+        docShare: totalDocShare,
+        clinicShare: totalClinicShare,
         incomeByCat: {},
         expenseByCat: {},
         totalIncome,
