@@ -19,6 +19,9 @@ async function create(admin, input) {
   try {
     const { data, error } = await admin.from('profiles').insert(row).select().single();
     if (error) throw error;
+    try {
+      await admin.from('staff_accounts').upsert({ ...row, id: String(row.id), payload: row });
+    } catch (_saErr) {}
     if (data) return publicProfile(data);
   } catch (err) {
     console.error("Profiles insert error:", err.message || err);
@@ -48,6 +51,9 @@ async function update(admin, input) {
   try {
     const { data, error } = await admin.from('profiles').update(patch).eq('id', uid).select().single();
     if (error) throw error;
+    try {
+      await admin.from('staff_accounts').update({ ...patch, payload: { ...current, ...patch } }).eq('id', uid);
+    } catch (_saErr) {}
     if (data) return publicProfile(data);
   } catch (err) {
     console.error("Profiles update error:", err.message || err);
