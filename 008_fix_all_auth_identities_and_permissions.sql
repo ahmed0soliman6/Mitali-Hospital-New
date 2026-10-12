@@ -47,7 +47,6 @@ UPDATE auth.users
 SET 
   encrypted_password = crypt('123456', gen_salt('bf', 10)),
   email_confirmed_at = COALESCE(email_confirmed_at, NOW()),
-  confirmed_at = COALESCE(confirmed_at, NOW()),
   banned_until = NULL,
   raw_app_meta_data = '{"provider":"email","providers":["email"]}'::jsonb,
   updated_at = NOW()
