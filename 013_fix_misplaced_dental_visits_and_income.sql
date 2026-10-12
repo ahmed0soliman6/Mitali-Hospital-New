@@ -14,7 +14,10 @@ INSERT INTO public.visits_dental (
     linked_income_id, next_visit_date, payload, updated_at
 )
 SELECT 
-    vc.id, vc.date, vc.month, vc.file_no, vc.patient, vc.phone, vc.doctor_id, vc.doctor_name,
+    vc.id, 
+    CASE WHEN vc.date::TEXT ~ '^\d{4}-\d{2}-\d{2}' THEN (SUBSTRING(vc.date::TEXT FROM 1 FOR 10))::DATE ELSE NULL END,
+    COALESCE(vc.month, SUBSTRING(vc.date::TEXT FROM 1 FOR 7)),
+    vc.file_no, vc.patient, vc.phone, vc.doctor_id, vc.doctor_name,
     vc.exam_type, vc.services, vc.total, 
     GREATEST(COALESCE(vc.paid, 0), COALESCE(vd.paid, 0)),
     COALESCE(vc.payment_method, vd.payment_method, 'نقدي'),
@@ -25,7 +28,7 @@ SELECT
     END,
     COALESCE(vc.notes, vd.notes),
     COALESCE(vc.linked_income_id, vd.linked_income_id),
-    COALESCE(vc.next_visit_date, vd.next_visit_date),
+    CASE WHEN COALESCE(vc.next_visit_date, vd.next_visit_date)::TEXT ~ '^\d{4}-\d{2}-\d{2}' THEN (SUBSTRING(COALESCE(vc.next_visit_date, vd.next_visit_date)::TEXT FROM 1 FOR 10))::DATE ELSE NULL END,
     vc.payload,
     NOW()
 FROM public.visits_clinic vc
@@ -78,7 +81,7 @@ WITH dental_stats AS (
         COUNT(*) AS v_count,
         SUM(COALESCE(paid, 0)) AS v_paid,
         SUM(GREATEST(0, COALESCE(total, 0) - COALESCE(paid, 0))) AS v_due,
-        MAX(date) AS last_date,
+        MAX(date::TEXT) AS last_date,
         MAX(updated_at) AS last_updated
     FROM public.visits_dental
     GROUP BY computed_key
@@ -95,7 +98,7 @@ SELECT
     v_count,
     v_paid,
     v_due,
-    last_date,
+    CASE WHEN last_date ~ '^\d{4}-\d{2}-\d{2}' THEN (SUBSTRING(last_date FROM 1 FOR 10))::DATE ELSE NULL END,
     NOW()
 FROM dental_stats
 ON CONFLICT (id) DO UPDATE SET
