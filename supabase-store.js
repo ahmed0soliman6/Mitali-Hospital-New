@@ -266,9 +266,9 @@
       return {
         id: String(payload.id),
         name: payload.name || null,
-        role: payload.role || null,
+        role: payload.role || payload.job || null,
         phone: payload.phone || null,
-        base_salary: payload.baseSalary != null ? Number(payload.baseSalary) : null,
+        base_salary: payload.baseSalary != null ? Number(payload.baseSalary) : (payload.salary != null ? Number(payload.salary) : null),
         status: payload.status || null,
         payload,
         updated_at
@@ -370,8 +370,14 @@
     if (row.clinic_pct !== undefined && row.clinic_pct !== null) res.clinicPct = Number(row.clinic_pct);
     if (row.doc_pct !== undefined && row.doc_pct !== null) res.docPct = Number(row.doc_pct);
     if (row.checkup_clinic_fee !== undefined && row.checkup_clinic_fee !== null) res.checkupClinicFee = Number(row.checkup_clinic_fee);
-    if (row.role !== undefined && row.role !== null) res.role = row.role;
-    if (row.base_salary !== undefined && row.base_salary !== null) res.baseSalary = Number(row.base_salary);
+    if (row.role !== undefined && row.role !== null) {
+      res.role = row.role;
+      if (!res.job) res.job = row.role;
+    }
+    if (row.base_salary !== undefined && row.base_salary !== null) {
+      res.baseSalary = Number(row.base_salary);
+      if (res.salary == null) res.salary = Number(row.base_salary);
+    }
 
     // Finance (income / expense) fields
     if (row.party !== undefined && row.party !== null) res.party = row.party;
@@ -594,11 +600,19 @@
     if (key === "specialties") {
       const best = rows.find(r => r.id === "app" || r.id === "specialties") || rows[0];
       const val = Array.isArray(best?.value) ? best.value : (Array.isArray(best?.payload?.value) ? best.payload.value : (Array.isArray(best?.payload) ? best.payload : fallback));
-      return val;
+      return Array.isArray(val) ? val : fallback;
     }
     if (key === "settings") {
       const best = rows.find(r => r.id === "app" || r.id === "settings") || rows[0];
-      return best;
+      if (!best) return fallback;
+      const out = {
+        ...(best.payload || {}),
+        ...(best.value && typeof best.value === "object" && !Array.isArray(best.value) ? best.value : {}),
+        id: "app"
+      };
+      delete out.value;
+      delete out.payload;
+      return out;
     }
     return rows;
   }
@@ -664,9 +678,21 @@
       const safeVal = (value && typeof value === "object" && !Array.isArray(value)) ? value : {};
       const inc = Array.isArray(safeVal.income) ? safeVal.income : [];
       const exp = Array.isArray(safeVal.expense) ? safeVal.expense : [];
-      return upsertRecord("categories", { id: "app", income: inc, expense: exp });
+      const cleanCats = { id: "app", income: inc, expense: exp };
+      return upsertRecord("categories", { id: "app", value: cleanCats, payload: cleanCats });
     }
-    return upsertRecord(key, { id: "app", ...(Array.isArray(value) && key === "specialties" ? { value } : value || {}) });
+    if (key === "specialties") {
+      const list = Array.isArray(value) ? value : (Array.isArray(value?.value) ? value.value : []);
+      const cleanSpecs = { id: "app", value: list };
+      return upsertRecord("specialties", { id: "app", value: list, payload: cleanSpecs });
+    }
+    if (key === "settings") {
+      const cleanSettings = { ...(value || {}) };
+      delete cleanSettings.value;
+      delete cleanSettings.payload;
+      return upsertRecord("settings", { id: "app", value: cleanSettings, payload: { id: "app", ...cleanSettings } });
+    }
+    return upsertRecord(key, { id: "app", ...(Array.isArray(value) ? { value } : value || {}) });
   }
   async function setTable(key, records) {
     await ready();

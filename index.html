@@ -490,37 +490,24 @@ function ensureValidCategories() {
   const defaultIncomeNames = ["كشف","تحاليل","أشعة","أسنان","عمليات","تبرعات","اشتراكات","أخرى"];
   const defaultExpenseNames = ["مرتبات","مشتريات","صيانة","خدمات","نظافة","كهرباء","مياه","مستلزمات طبية","أخرى"];
 
-  if (Array.isArray(DB.income)) {
-    DB.income.forEach(inc => {
-      const name = String(inc?.category || "").trim();
-      if (name && !defaultIncomeNames.includes(name)) defaultIncomeNames.push(name);
-    });
-  }
-  if (Array.isArray(DB.expense)) {
-    DB.expense.forEach(exp => {
-      const name = String(exp?.category || "").trim();
-      if (name && !defaultExpenseNames.includes(name)) defaultExpenseNames.push(name);
-    });
-  }
-
   if (DB.categories.income.length === 0) {
+    if (Array.isArray(DB.income)) {
+      DB.income.forEach(inc => {
+        const name = String(inc?.category || "").trim();
+        if (name && !defaultIncomeNames.includes(name)) defaultIncomeNames.push(name);
+      });
+    }
     DB.categories.income = defaultIncomeNames.map((name, i) => ({ id: uid(), name, order: i }));
-  } else {
-    defaultIncomeNames.forEach(name => {
-      if (!DB.categories.income.some(c => c.name === name)) {
-        DB.categories.income.push({ id: uid(), name, order: DB.categories.income.length });
-      }
-    });
   }
 
   if (DB.categories.expense.length === 0) {
+    if (Array.isArray(DB.expense)) {
+      DB.expense.forEach(exp => {
+        const name = String(exp?.category || "").trim();
+        if (name && !defaultExpenseNames.includes(name)) defaultExpenseNames.push(name);
+      });
+    }
     DB.categories.expense = defaultExpenseNames.map((name, i) => ({ id: uid(), name, order: i }));
-  } else {
-    defaultExpenseNames.forEach(name => {
-      if (!DB.categories.expense.some(c => c.name === name)) {
-        DB.categories.expense.push({ id: uid(), name, order: DB.categories.expense.length });
-      }
-    });
   }
   return DB.categories;
 }
@@ -1728,6 +1715,9 @@ async function loadAll(options = {}) {
     if (isManager || can("specialties", "edit") || can("settings", "edit")) persist("specialties");
   }
   DB.auditLog = auditLogRaw || [];
+  ["doctors", "employees", "settings", "categories", "specialties", "staffAccounts"].forEach(k => {
+    PAGE_DATA_LOADED_AT[k] = Date.now();
+  });
   // ترقية آمنة للسجلات القديمة: بعض نسخ الخدمة السابقة حفظت اليومية دون
   // linkedIncomeId، فكانت الإيرادات موجودة في اليومية لكنها لا تظهر في دفتر الوارد
   // ولا في الرئيسية. نضيف القيد مرة واحدة لكل سجل مدفوع بلا رابط، ولا نلمس السجل
@@ -3532,8 +3522,8 @@ console.log("Computation layer ready.");
 // ======================================================================
 // تكامل Firestore (قاعدة البيانات الرئيسية الوحيدة)
 // ======================================================================
-const APP_VERSION = "v1.3.50";
-const APP_RELEASE_NOTES = "تفعيل ميزة استرداد كلمة مرور المدير وحفظ رمز الاسترداد المشفر بنجاح";
+const APP_VERSION = "v1.3.51";
+const APP_RELEASE_NOTES = "إصلاح بطاقات الإعدادات بالكامل: منع اختفاء البيانات أو عودتها عند الإضافة أو الحذف في تخصصات الأطباء، أنواع الأشعة، أنواع التحاليل، الأطباء، الموظفين، والتصنيفات";
 const FIRESTORE_MIGRATION_KEYS = ["doctors","employees","visitsClinic","visitsDental","visitsOperations","visitsLabs","visitsRadiology","income","expense","payroll","auditLog","labExpenses","categories","specialties","settings"];
 // Restore إداري صريح: الحذف هنا ناتج عن قائمة النسخة الاحتياطية نفسها، وليس
 // عن storeSetInner أو مقارنة Snapshot عادية. لا يُستدعى أثناء CRUD المعتاد.
@@ -8637,25 +8627,25 @@ function renderSettings() {
     }
   });
   const saveIdleTimeoutBtn = document.getElementById("saveIdleTimeout");
-  if (saveIdleTimeoutBtn) saveIdleTimeoutBtn.addEventListener("click", () => {
+  if (saveIdleTimeoutBtn) saveIdleTimeoutBtn.addEventListener("click", async () => {
     if (!canSettingsEdit) { showToast("⚠️ ليس لديك صلاحية"); return; }
     const enabled = document.getElementById("idleTimeoutEnabled").checked;
     const mins = Math.max(1, Math.round(Number(document.getElementById("idleTimeoutInput").value)) || 5);
     const before = DB.settings.idleTimeoutMinutes;
     DB.settings.idleTimeoutMinutes = enabled ? mins : 0;
     logActivity("تعديل مهلة الإغلاق التلقائى", "settings", before, DB.settings.idleTimeoutMinutes);
-    persist("settings");
+    await persist("settings");
     resetIdleTimer();
     showToast(enabled ? `تم الحفظ — سيُغلق تسجيل الدخول تلقائيًا بعد ${mins} دقيقة من عدم الاستخدام` : "تم إيقاف الإغلاق التلقائى");
     route();
   });
   const saveOpeningBtn = document.getElementById("saveOpening");
-  if (saveOpeningBtn) saveOpeningBtn.addEventListener("click", () => {
+  if (saveOpeningBtn) saveOpeningBtn.addEventListener("click", async () => {
     if (!canSettingsEdit) { showToast("⚠️ ليس لديك صلاحية"); return; }
     const before = DB.settings.openingBalance;
     DB.settings.openingBalance = Number(document.getElementById("openingInput").value) || 0;
     logActivity("تعديل الرصيد الافتتاحي", "settings", before, DB.settings.openingBalance);
-    persist("settings"); showToast("تم حفظ الرصيد الافتتاحي"); route();
+    await persist("settings"); showToast("تم حفظ الرصيد الافتتاحي"); route();
   });
 
   const BACKUP_KEYS = BACKUP_EXPORT_KEYS;
@@ -9081,7 +9071,7 @@ function renderSettings() {
   }
   c.querySelectorAll("[data-catup]").forEach(b => b.addEventListener("click", () => moveCat(b.dataset.catkind2, b.dataset.catup, -1)));
   c.querySelectorAll("[data-catdown]").forEach(b => b.addEventListener("click", () => moveCat(b.dataset.catkind2, b.dataset.catdown, 1)));
-  c.querySelectorAll("[data-catdel]").forEach(b => b.addEventListener("click", () => {
+  c.querySelectorAll("[data-catdel]").forEach(b => b.addEventListener("click", async () => {
     if (!can("categories","delete")) { showToast("⚠️ ليس لديك صلاحية حذف التصنيفات"); return; }
     const kind = b.dataset.catkind4;
     const cat = DB.categories[kind].find(x => x.id === b.dataset.catdel);
@@ -9095,23 +9085,23 @@ function renderSettings() {
       if (!exists) { showToast("⚠️ التصنيف المطلوب النقل إليه غير موجود"); return; }
       const list = kind === "income" ? DB.income : DB.expense;
       list.forEach(x => { if (x.category === cat.name) x.category = target; });
-      persist(kind === "income" ? "income" : "expense");
+      await persist(kind === "income" ? "income" : "expense");
       DB.categories[kind].splice(DB.categories[kind].findIndex(x => x.id === cat.id), 1);
       logActivity("حذف تصنيف (مع نقل العمليات)", "categories", cat.name, target);
-      persist("categories");
+      await persist("categories");
       showToast(`تم نقل العمليات إلى "${target}" وحذف التصنيف`); route();
       return;
     }
     if (!confirm(`حذف التصنيف "${cat.name}"؟`)) return;
     DB.categories[kind].splice(DB.categories[kind].findIndex(x => x.id === cat.id), 1);
     logActivity("حذف تصنيف", "categories", cat.name, null);
-    persist("categories"); showToast("تم الحذف"); route();
+    await persist("categories"); showToast("تم الحذف"); route();
   }));
 
   // ---- إدارة تخصصات الأطباء ----
   const specAddForm = document.getElementById("specAddForm");
   if (specAddForm) {
-    specAddForm.addEventListener("submit", e => {
+    specAddForm.addEventListener("submit", async e => {
       e.preventDefault();
       if (!can("doctors","edit")) { showToast("⚠️ ليس لديك صلاحية إضافة تخصصات"); return; }
       const input = specAddForm.querySelector('[name="specName"]');
@@ -9122,10 +9112,11 @@ function renderSettings() {
       const maxOrder = DB.specialties.reduce((m, x) => Math.max(m, x.order ?? 0), -1);
       DB.specialties.push({ id: uid(), name, order: maxOrder + 1 });
       logActivity("إضافة تخصص", "settings", null, name);
-      persist("specialties"); showToast("تمت إضافة التخصص"); route();
+      input.value = "";
+      await persist("specialties"); showToast("تمت إضافة التخصص"); route();
     });
   }
-  c.querySelectorAll("[data-specdel]").forEach(b => b.addEventListener("click", () => {
+  c.querySelectorAll("[data-specdel]").forEach(b => b.addEventListener("click", async () => {
     if (!can("doctors","edit")) { showToast("⚠️ ليس لديك صلاحية حذف تخصصات"); return; }
     const spec = (DB.specialties || []).find(x => x.id === b.dataset.specdel);
     if (!spec) return;
@@ -9133,12 +9124,12 @@ function renderSettings() {
     if (!confirm(`حذف تخصص "${spec.name}"؟`)) return;
     DB.specialties.splice(DB.specialties.findIndex(x => x.id === spec.id), 1);
     logActivity("حذف تخصص", "settings", spec.name, null);
-    persist("specialties"); showToast("تم الحذف"); route();
+    await persist("specialties"); showToast("تم الحذف"); route();
   }));
 
   // ---- إدارة أنواع الأشعة وأنواع التحاليل (مخزّنة داخل DB.settings) ----
   const xrayTypeAddForm = document.getElementById("xrayTypeAddForm");
-  if (xrayTypeAddForm) xrayTypeAddForm.addEventListener("submit", e => {
+  if (xrayTypeAddForm) xrayTypeAddForm.addEventListener("submit", async e => {
     e.preventDefault();
     if (!can("settings","edit")) { showToast("⚠️ ليس لديك صلاحية إضافة أنواع أشعة"); return; }
     const input = xrayTypeAddForm.querySelector('[name="typeName"]');
@@ -9147,22 +9138,25 @@ function renderSettings() {
     DB.settings.xrayTypes = DB.settings.xrayTypes || [];
     if (DB.settings.xrayTypes.includes(name)) { showToast("⚠️ هذا النوع موجود بالفعل"); return; }
     DB.settings.xrayTypes.push(name);
+    DB.settings.serviceTypesVersion = SERVICE_TYPES_VERSION;
     logActivity("إضافة نوع أشعة", "settings", null, name);
-    persist("settings"); showToast("تمت الإضافة"); route();
+    input.value = "";
+    await persist("settings"); showToast("تمت الإضافة"); route();
   });
-  c.querySelectorAll("[data-xraytypedel]").forEach(b => b.addEventListener("click", () => {
+  c.querySelectorAll("[data-xraytypedel]").forEach(b => b.addEventListener("click", async () => {
     if (!can("settings","edit")) { showToast("⚠️ ليس لديك صلاحية حذف أنواع أشعة"); return; }
     const idx = Number(b.dataset.xraytypedel);
     const name = DB.settings.xrayTypes[idx];
     if (name === undefined) return;
     if (!confirm(`حذف نوع الأشعة "${name}"؟ (لن يؤثر على السجلات السابقة التى استُخدم فيها)`)) return;
     DB.settings.xrayTypes.splice(idx, 1);
+    DB.settings.serviceTypesVersion = SERVICE_TYPES_VERSION;
     logActivity("حذف نوع أشعة", "settings", name, null);
-    persist("settings"); showToast("تم الحذف"); route();
+    await persist("settings"); showToast("تم الحذف"); route();
   }));
 
   const labTestTypeAddForm = document.getElementById("labTestTypeAddForm");
-  if (labTestTypeAddForm) labTestTypeAddForm.addEventListener("submit", e => {
+  if (labTestTypeAddForm) labTestTypeAddForm.addEventListener("submit", async e => {
     e.preventDefault();
     if (!can("settings","edit")) { showToast("⚠️ ليس لديك صلاحية إضافة أنواع تحاليل"); return; }
     const input = labTestTypeAddForm.querySelector('[name="typeName"]');
@@ -9171,22 +9165,25 @@ function renderSettings() {
     DB.settings.labTestTypes = DB.settings.labTestTypes || [];
     if (DB.settings.labTestTypes.includes(name)) { showToast("⚠️ هذا النوع موجود بالفعل"); return; }
     DB.settings.labTestTypes.push(name);
+    DB.settings.serviceTypesVersion = SERVICE_TYPES_VERSION;
     logActivity("إضافة نوع تحليل", "settings", null, name);
-    persist("settings"); showToast("تمت الإضافة"); route();
+    input.value = "";
+    await persist("settings"); showToast("تمت الإضافة"); route();
   });
-  c.querySelectorAll("[data-labtesttypedel]").forEach(b => b.addEventListener("click", () => {
+  c.querySelectorAll("[data-labtesttypedel]").forEach(b => b.addEventListener("click", async () => {
     if (!can("settings","edit")) { showToast("⚠️ ليس لديك صلاحية حذف أنواع تحاليل"); return; }
     const idx = Number(b.dataset.labtesttypedel);
     const name = DB.settings.labTestTypes[idx];
     if (name === undefined) return;
     if (!confirm(`حذف نوع التحليل "${name}"؟ (لن يؤثر على السجلات السابقة التى استُخدم فيها)`)) return;
     DB.settings.labTestTypes.splice(idx, 1);
+    DB.settings.serviceTypesVersion = SERVICE_TYPES_VERSION;
     logActivity("حذف نوع تحليل", "settings", name, null);
-    persist("settings"); showToast("تم الحذف"); route();
+    await persist("settings"); showToast("تم الحذف"); route();
   }));
 
   const doctorForm = document.getElementById("doctorForm");
-  if (doctorForm) doctorForm.addEventListener("submit", e => {
+  if (doctorForm) doctorForm.addEventListener("submit", async e => {
     e.preventDefault();
     const fd = new FormData(e.target);
     const editId = fd.get("editId");
@@ -9235,8 +9232,8 @@ function renderSettings() {
       saveToast("تمت إضافة الطبيب");
     }
     invalidateDoctorReportsCache();
+    await persist("doctors");
     route();
-    persistAfterPaint("doctors", "بيانات الطبيب");
   });
   // لكل نوع نسبة مستقلة: تغيير نسبة الطبيب يملأ نسبة المجمع من الباقي تلقائيًا.
   const docPctInput = document.getElementById("docPctInput");
@@ -9290,12 +9287,21 @@ function renderSettings() {
   if (docTypeInput) { updateFeeModeVisibility(); docTypeInput.addEventListener("change", updateFeeModeVisibility); }
   if (feeModeInput) feeModeInput.addEventListener("change", updateFeeModeVisibility);
   const empForm = document.getElementById("empForm");
-  if (empForm) empForm.addEventListener("submit", e => {
+  if (empForm) empForm.addEventListener("submit", async e => {
     e.preventDefault();
     const fd = new FormData(e.target);
     const editId = fd.get("editId");
     if (editId ? !can("employees","edit") : !can("employees","add")) { showToast("⚠️ ليس لديك صلاحية كافية"); return; }
-    const rec = { name: fd.get("name"), job: fd.get("job"), salary: Number(fd.get("salary")) || 0, status: fd.get("status") };
+    const jobTitle = String(fd.get("job") || "").trim();
+    const salVal = Number(fd.get("salary")) || 0;
+    const rec = {
+      name: fd.get("name"),
+      job: jobTitle,
+      role: jobTitle,
+      salary: salVal,
+      baseSalary: salVal,
+      status: fd.get("status")
+    };
     if (editId) {
       const emp = DB.employees.find(x => x.id === editId);
       const before = emp ? { ...emp } : null;
@@ -9309,28 +9315,28 @@ function renderSettings() {
       logActivity("إضافة موظف", "settings", null, newEmp);
       saveToast("تمت إضافة الموظف");
     }
+    await persist("employees");
     route();
-    persistAfterPaint("employees", "بيانات الموظف");
   });
   c.querySelectorAll("[data-editemp]").forEach(b => b.addEventListener("click", () => { state.editEmpId = b.dataset.editemp; route(); }));
   const cancelEmpEditBtn = document.getElementById("cancelEmpEdit");
   if (cancelEmpEditBtn) cancelEmpEditBtn.addEventListener("click", () => { state.editEmpId = null; route(); });
-  c.querySelectorAll("[data-toggleemp]").forEach(b => b.addEventListener("click", () => {
+  c.querySelectorAll("[data-toggleemp]").forEach(b => b.addEventListener("click", async () => {
     if (!can("employees","edit")) { showToast("⚠️ ليس لديك صلاحية"); return; }
     const emp = DB.employees.find(x => x.id === b.dataset.toggleemp);
     const before = emp.status;
     emp.status = emp.status === "موقوف" ? "نشط" : "موقوف";
     logActivity("تغيير حالة موظف", "settings", before, emp.status);
-    persist("employees"); route();
+    await persist("employees"); route();
   }));
-  c.querySelectorAll("[data-toggle]").forEach(b => b.addEventListener("click", () => {
+  c.querySelectorAll("[data-toggle]").forEach(b => b.addEventListener("click", async () => {
     if (!can("doctors","edit")) { showToast("⚠️ ليس لديك صلاحية"); return; }
     const d = DB.doctors.find(x => x.id === b.dataset.toggle);
     const before = d.status;
     d.status = d.status === "نشط" ? "موقوف" : "نشط";
     logActivity("تغيير حالة طبيب", "settings", before, d.status);
     invalidateDoctorReportsCache();
-    persist("doctors"); route();
+    await persist("doctors"); route();
   }));
   c.querySelectorAll("[data-deldoc]").forEach(b => b.addEventListener("click", async () => {
     if (!can("doctors","delete")) { showToast("⚠️ ليس لديك صلاحية"); return; }
@@ -9371,7 +9377,7 @@ function renderSettings() {
       row.style.display = row.dataset.docsearch.includes(term) ? "" : "none";
     });
   });
-  function moveDoc(id, dir) {
+  async function moveDoc(id, dir) {
     if (!can("doctors","edit")) { showToast("⚠️ ليس لديك صلاحية"); return; }
     const list = sortedDoctors();
     const idx = list.findIndex(x => x.id === id);
@@ -9379,7 +9385,7 @@ function renderSettings() {
     if (idx < 0 || swapIdx < 0 || swapIdx >= list.length) return;
     const a = list[idx], b = list[swapIdx];
     const tmp = a.order ?? idx; a.order = b.order ?? swapIdx; b.order = tmp;
-    persist("doctors"); route();
+    await persist("doctors"); route();
   }
   c.querySelectorAll("[data-docup]").forEach(b => b.addEventListener("click", () => moveDoc(b.dataset.docup, -1)));
   c.querySelectorAll("[data-docdown]").forEach(b => b.addEventListener("click", () => moveDoc(b.dataset.docdown, 1)));
