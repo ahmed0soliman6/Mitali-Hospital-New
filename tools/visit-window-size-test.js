@@ -2,7 +2,7 @@ const fs = require('fs');
 const vm = require('vm');
 const assert = require('assert');
 
-const index = fs.readFileSync('index.html', 'utf8');
+const index = fs.readFileSync('index.html', 'utf8').replace(/\r\n/g, '\n');
 const grab = (re, name) => { const m = index.match(re); assert.ok(m, name + ' must exist'); return m[0]; };
 const fnRange = grab(/function visitPeriodDateRange\(kindKey\) \{[\s\S]*?\n\}\n/, 'visitPeriodDateRange');
 const fnOpts = grab(/function pageQueryOptions\(key, page\) \{[\s\S]*?\n\}\n/, 'pageQueryOptions');

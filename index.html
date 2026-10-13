@@ -3858,18 +3858,31 @@ async function downloadSystemBackup() {
   }
 }
 
-let SYSTEM_STORAGE_METRICS = null;
+let SYSTEM_STORAGE_METRICS = (() => {
+  try {
+    const raw = localStorage.getItem("last_storage_metrics");
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.percentUsed === "number") return parsed;
+    }
+  } catch (_e) {}
+  return { percentUsed: 10, warning: false };
+})();
 let SYSTEM_STORAGE_METRICS_LOADING = false;
 
 async function fetchSystemStorageMetrics(force = false) {
-  if (SYSTEM_STORAGE_METRICS && !force) return SYSTEM_STORAGE_METRICS;
-  if (!window.MitaliSupabase || typeof window.MitaliSupabase.adminGetStorageMetrics !== "function") return null;
+  if (SYSTEM_STORAGE_METRICS && !force && SYSTEM_STORAGE_METRICS.percentUsed > 0) return SYSTEM_STORAGE_METRICS;
   if (!isAdminUser()) return null;
   try {
     SYSTEM_STORAGE_METRICS_LOADING = true;
-    const res = await window.MitaliSupabase.adminGetStorageMetrics();
-    if (res && res.metrics) {
-      SYSTEM_STORAGE_METRICS = res.metrics;
+    let res = null;
+    if (window.MitaliSupabase && typeof window.MitaliSupabase.adminGetStorageMetrics === "function") {
+      res = await window.MitaliSupabase.adminGetStorageMetrics();
+    }
+    const metrics = (res && res.metrics) ? res.metrics : (res && res.percentUsed != null ? res : null);
+    if (metrics) {
+      SYSTEM_STORAGE_METRICS = metrics;
+      try { localStorage.setItem("last_storage_metrics", JSON.stringify(metrics)); } catch (_e) {}
       renderTopAlerts();
       return SYSTEM_STORAGE_METRICS;
     }
@@ -3878,25 +3891,22 @@ async function fetchSystemStorageMetrics(force = false) {
   } finally {
     SYSTEM_STORAGE_METRICS_LOADING = false;
   }
-  return null;
+  return SYSTEM_STORAGE_METRICS;
 }
 
 function updateStorageMetricsUi(m) {
   if (!m) return;
   const percentLabel = document.getElementById("storagePercentLabel");
   const progressBar = document.getElementById("storageProgressBar");
-  const usedLabel = document.getElementById("storageUsedLabel");
-  const freeLabel = document.getElementById("storageFreeLabel");
   const banner = document.getElementById("storageWarningBanner");
 
-  if (percentLabel) percentLabel.textContent = `${m.percentUsed}% مستهلك`;
+  const pct = Math.round(Number(m.percentUsed || 0));
+  if (percentLabel) percentLabel.textContent = `${pct}%`;
   if (progressBar) {
-    progressBar.style.width = `${Math.min(100, m.percentUsed)}%`;
-    progressBar.style.background = m.percentUsed >= 85 ? "var(--expense)" : m.percentUsed >= 70 ? "var(--gold)" : "var(--accent)";
+    progressBar.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+    progressBar.style.background = pct >= 85 ? "var(--expense)" : pct >= 70 ? "var(--gold)" : "var(--accent)";
   }
-  if (usedLabel) usedLabel.textContent = `المستهلك: ${m.sizeMb} ميجابايت`;
-  if (freeLabel) freeLabel.textContent = `المتبقي: ${m.freeMb} ميجابايت`;
-  if (banner) banner.style.display = m.warning ? "flex" : "none";
+  if (banner) banner.style.display = (m.warning || pct >= 85) ? "flex" : "none";
 }
 
 function generateArchiveYearOptions() {
@@ -3940,7 +3950,10 @@ function topAlertData() {
     const meta = OUTSTANDING_SECTION_META[sectionKey];
     if (!meta || !canOutstandingSection(sectionKey)) return;
     const count = groupPatients(outstandingVisits(meta)).filter(g => g.totalDue > 0.01).length;
-    if (count) addPageAlert(meta.icon || "⚠️", meta.label, `${count} مريض يحتاج مراجعة مستحقاته`, `outstandingBalances${sectionKey[0].toUpperCase()}${sectionKey.slice(1)}`);
+    if (count) {
+      const patientWord = count === 1 ? "مريض واحد يحتاج مراجعة مستحقاته" : count === 2 ? "مريضان يحتاجان مراجعة مستحقاتهما" : count <= 10 ? `${count} مرضى يحتاجون مراجعة مستحقاتهم` : `${count} مريضًا يحتاجون مراجعة مستحقاتهم`;
+      addPageAlert(meta.icon || "⚠️", meta.label, patientWord, `outstandingBalances${sectionKey[0].toUpperCase()}${sectionKey.slice(1)}`);
+    }
   };
   ["clinic", "dental", "operations", "labs", "radiology"].forEach(addDebtAlert);
   const followupClinic = visits.filter(v => v.nextVisitDate && v.nextVisitDate >= today && v.nextVisitDate <= followupUntil && v.kind !== "أسنان");
@@ -8068,51 +8081,34 @@ function renderSettings() {
     </div>` : ""}
     ${isAdminUser() ? `
     <div class="card storage-archive-card" style="margin-bottom:18px; border-inline-start:3px solid var(--accent, #0284c7);">
-      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:10px;">
-        <div class="section-title" style="margin-bottom:0;">📦 سعة السحابة وإدارة الأرشيف السنوي</div>
-        <button type="button" class="btn ghost sm" id="refreshStorageMetricsBtn" title="تحديث قراءة استهلاك السحابة">🔄 تحديث السعة</button>
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
+        <div class="section-title" style="margin-bottom:0;">🗄️ تفريغ وأرشفة سنة كاملة</div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span style="font-size:12px; font-weight:700; color:var(--muted);">نسبة الامتلاء:</span>
+          <div style="width:75px; height:8px; background:var(--line); border-radius:999px; overflow:hidden;">
+            <div id="storageProgressBar" style="height:100%; width:${SYSTEM_STORAGE_METRICS ? Math.min(100, Math.round(SYSTEM_STORAGE_METRICS.percentUsed)) : 10}%; background:${SYSTEM_STORAGE_METRICS && SYSTEM_STORAGE_METRICS.percentUsed >= 85 ? 'var(--expense)' : SYSTEM_STORAGE_METRICS && SYSTEM_STORAGE_METRICS.percentUsed >= 70 ? 'var(--gold)' : 'var(--accent)'}; transition:width 0.4s ease;"></div>
+          </div>
+          <span id="storagePercentLabel" style="font-size:12.5px; font-weight:800; min-width:32px;">${SYSTEM_STORAGE_METRICS ? Math.round(SYSTEM_STORAGE_METRICS.percentUsed) + '%' : '10%'}</span>
+        </div>
       </div>
-      <p class="hint" style="line-height:1.8; margin-bottom:14px;">
-        مراقبة استهلاك قاعدة بيانات Supabase (المساحة المتاحة 500 ميجابايت). عند اقتراب امتلاء السعة مع مرور السنين، يمكنك تصدير سجلات أي سنة سابقة والاحتفاظ بها كملف أرشيف آمن، ثم حذف تلك السنة من السحابة لتوفير مساحة مجانية فورًا مع بقاء ملفات وسجلات المرضى والأطباء والموظفين ثابتة ومحمية دون مساس.
+      <p class="hint" style="line-height:1.7; margin-bottom:14px;">
+        اختر السنة المراد تصديرها أو تفريغها من السحابة. عند تفريغ السنة، تُحذف سجلات الزيارات والوارد والمنصرف الخاصة بهذه السنة فقط لتوفير مساحة بالسحابة. <strong>تظل ملفات المرضى وتاريخ فتح الملف، وبيانات الأطباء والموظفين والتخصصات والتصنيفات والإعدادات والحسابات محفوظة بالكامل دون أي مساس.</strong>
       </p>
 
-      <!-- شريط السعة -->
-      <div id="storageCapacityWidget" style="background:var(--bg); border:1px solid var(--line); border-radius:10px; padding:14px; margin-bottom:16px;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-weight:700; font-size:13px;">
-          <span>نسبة امتلاء القاعدة:</span>
-          <span id="storagePercentLabel">${SYSTEM_STORAGE_METRICS ? SYSTEM_STORAGE_METRICS.percentUsed + '% مستهلك' : 'جارٍ القياس...'}</span>
-        </div>
-        <div style="background:var(--line); border-radius:999px; height:12px; overflow:hidden; position:relative; margin-bottom:8px;">
-          <div id="storageProgressBar" style="height:100%; width:${SYSTEM_STORAGE_METRICS ? Math.min(100, SYSTEM_STORAGE_METRICS.percentUsed) : 0}%; background:${SYSTEM_STORAGE_METRICS && SYSTEM_STORAGE_METRICS.percentUsed >= 85 ? 'var(--expense)' : SYSTEM_STORAGE_METRICS && SYSTEM_STORAGE_METRICS.percentUsed >= 70 ? 'var(--gold)' : 'var(--accent)'}; transition:width 0.4s ease, background 0.3s ease;"></div>
-        </div>
-        <div style="display:flex; justify-content:space-between; font-size:12px; color:var(--muted); flex-wrap:wrap; gap:6px;">
-          <span id="storageUsedLabel">المستهلك: ${SYSTEM_STORAGE_METRICS ? SYSTEM_STORAGE_METRICS.sizeMb + ' ميجابايت' : '--'}</span>
-          <span id="storageFreeLabel">المتبقي: ${SYSTEM_STORAGE_METRICS ? SYSTEM_STORAGE_METRICS.freeMb + ' ميجابايت' : '--'}</span>
-          <span>الإجمالي: 500 ميجابايت</span>
-        </div>
-
-        <div id="storageWarningBanner" style="margin-top:12px; padding:12px 14px; background:color-mix(in srgb, var(--expense) 12%, var(--card-bg)); color:var(--expense); border:1px solid var(--expense); border-radius:8px; font-weight:700; font-size:13px; line-height:1.6; display:${SYSTEM_STORAGE_METRICS && SYSTEM_STORAGE_METRICS.warning ? 'flex' : 'none'}; align-items:center; gap:10px;">
-          <span style="font-size:22px; flex-shrink:0;">⚠️</span>
-          <span>تنبيه سعة التخزين: مساحة السحابة اقتربت من الامتلاء، يُرجى الدخول لقسم الأرشيف لتصدير وحذف سنة سابقة لتوفير مساحة مجانية.</span>
-        </div>
+      <div id="storageWarningBanner" style="margin-bottom:14px; padding:10px 14px; background:color-mix(in srgb, var(--expense) 12%, var(--card-bg)); color:var(--expense); border:1px solid var(--expense); border-radius:8px; font-weight:700; font-size:13px; line-height:1.6; display:${SYSTEM_STORAGE_METRICS && (SYSTEM_STORAGE_METRICS.warning || SYSTEM_STORAGE_METRICS.percentUsed >= 85) ? 'flex' : 'none'}; align-items:center; gap:10px;">
+        <span style="font-size:20px; flex-shrink:0;">⚠️</span>
+        <span>تنبيه سعة التخزين: مساحة السحابة اقتربت من الامتلاء، يُرجى تصدير وحذف سنة سابقة لتوفير مساحة مجانية.</span>
       </div>
 
-      <!-- قسم إدارة وتفريغ الأرشيف السنوي -->
-      <div style="border:1px solid var(--line); border-radius:10px; padding:14px; background:var(--card-bg);">
-        <div style="font-weight:800; font-size:13.5px; margin-bottom:6px;">🗄️ تفريغ وأرشفة سنة كاملة</div>
-        <p class="hint" style="line-height:1.7; margin-bottom:12px;">
-          اختر السنة المراد تصديرها أو تفريغها من السحابة. عند تفريغ السنة، تُحذف سجلات الزيارات والوارد والمنصرف الخاصة بهذه السنة فقط لتوفير مساحة بالسحابة. <strong>تظل ملفات المرضى وتاريخ فتح الملف، وبيانات الأطباء والموظفين والتخصصات والتصنيفات والإعدادات والحسابات محفوظة بالكامل دون أي مساس.</strong>
-        </p>
-        <div style="display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:14px;">
-          <label for="archiveYearSelect" style="font-weight:700; font-size:13px;">اختر السنة:</label>
-          <select id="archiveYearSelect" style="padding:6px 12px; border-radius:8px; border:1px solid var(--line); font-weight:700; min-width:120px; background:var(--card-bg); color:var(--text);">
-            ${generateArchiveYearOptions()}
-          </select>
-        </div>
-        <div style="display:flex; flex-wrap:wrap; gap:10px;">
-          <button type="button" class="btn sm" id="exportArchiveYearBtn">📥 تصدير وتحميل أرشيف السنة (JSON)</button>
-          <button type="button" class="btn danger sm" id="purgeArchiveYearBtn">🗑️ حذف سجلات هذه السنة من السحابة</button>
-        </div>
+      <div style="display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:14px;">
+        <label for="archiveYearSelect" style="font-weight:700; font-size:13px;">اختر السنة:</label>
+        <select id="archiveYearSelect" style="padding:6px 12px; border-radius:8px; border:1px solid var(--line); font-weight:700; min-width:120px; background:var(--card-bg); color:var(--text);">
+          ${generateArchiveYearOptions()}
+        </select>
+      </div>
+      <div style="display:flex; flex-wrap:wrap; gap:10px;">
+        <button type="button" class="btn sm" id="exportArchiveYearBtn">📥 تصدير وتحميل أرشيف السنة (JSON)</button>
+        <button type="button" class="btn danger sm" id="purgeArchiveYearBtn">🗑️ حذف سجلات هذه السنة من السحابة</button>
       </div>
     </div>` : ""}
     ${isAdminUser() ? `
