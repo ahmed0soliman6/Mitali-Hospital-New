@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const { getAdmin, requireManager, userFromRequest, profile, publicProfile, fullPermissions, cleanPermissions, mockStore } = require('../_lib/supabase-admin');
 function emailFor(username) { const b = Buffer.from(String(username || '').trim().toLowerCase(), 'utf8').toString('base64').replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); return `u-${b}@accounts.mitali-hospital.internal`; }
 function json(res, code, body) { return res.status(code).setHeader('Cache-Control','no-store').json(body); }
@@ -85,8 +86,120 @@ module.exports = async function handler(req, res) {
     }
     if (req.method !== 'POST') return json(res, 405, { error: 'method-not-allowed' });
     const input = req.body || {};
-    if (input.action === 'recoverManagerPassword') return json(res, 501, { error: 'recovery-requires-configured-recovery-flow' });
-    const { admin } = await requireManager(req);
+    if (input.action === 'recoverManagerPassword') {
+      const username = String(input.username || '').trim().toLowerCase();
+      const recoveryCode = String(input.recoveryCode || '').trim();
+      const newPassword = String(input.newPassword || '');
+      if (username !== 'admin') throw Object.assign(new Error('only-admin-can-recover'), { status: 400 });
+      if (!recoveryCode) throw Object.assign(new Error('missing-recovery-code'), { status: 400 });
+      if (newPassword.length < 6) throw Object.assign(new Error('auth/weak-password'), { status: 400 });
+
+      const admin = getAdmin();
+      let recovery = null;
+
+      try {
+        const { data: scData } = await admin.from('system_control').select('value,payload').eq('id', 'manager_recovery').maybeSingle();
+        if (scData) recovery = scData.value || scData.payload;
+      } catch (_scErr) {}
+
+      let adminProfile = null;
+      try {
+        const { data: pData } = await admin.from('profiles').select('*').eq('username', 'admin').maybeSingle();
+        if (pData) {
+          adminProfile = pData;
+          if (!recovery && pData.permissions?._manager_recovery) {
+            recovery = pData.permissions._manager_recovery;
+          }
+        }
+      } catch (_pErr) {}
+
+      const email = emailFor('admin');
+      let adminAuthUser = null;
+      try {
+        const { data: usersData } = await admin.auth.admin.listUsers();
+        adminAuthUser = (usersData?.users || []).find(u => u.email === email || u.user_metadata?.username === 'admin');
+      } catch (_auErr) {}
+
+      if (!recovery && adminAuthUser?.user_metadata?.manager_recovery) {
+        recovery = adminAuthUser.user_metadata.manager_recovery;
+      }
+      if (!recovery && mockStore.manager_recovery) {
+        recovery = mockStore.manager_recovery;
+      }
+
+      if (!recovery || !recovery.hash || !recovery.salt) {
+        throw Object.assign(new Error('recovery-not-configured'), { status: 400 });
+      }
+
+      const computedHash = crypto.pbkdf2Sync(recoveryCode, recovery.salt, 100000, 32, 'sha256').toString('hex');
+      if (computedHash !== recovery.hash) {
+        throw Object.assign(new Error('invalid-recovery-code'), { status: 400 });
+      }
+
+      const targetUid = adminAuthUser?.id || adminProfile?.id;
+      if (targetUid) {
+        const { error: resetErr } = await admin.auth.admin.updateUserById(targetUid, { password: newPassword });
+        if (resetErr) {
+          console.error("Auth password reset error:", resetErr);
+          throw Object.assign(new Error(resetErr.message || 'auth-password-update-failed'), { status: 500 });
+        }
+      } else {
+        const mockAdmin = mockStore.users.get('supabase-admin');
+        if (mockAdmin) mockAdmin.password = newPassword;
+      }
+
+      try {
+        await admin.from('profiles').update({
+          credential_version: 1,
+          last_password_change_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        }).eq('username', 'admin');
+      } catch (_pErr) {}
+
+      return json(res, 200, { ok: true, message: 'password-reset-success' });
+    }
+    const { admin, user, profile: p } = await requireManager(req);
+    if (input.action === 'configureManagerRecovery') {
+      const code = String(input.recoveryCode || '').trim();
+      if (code.length < 10) throw Object.assign(new Error('recovery-code-too-short'), { status: 400 });
+
+      const salt = crypto.randomBytes(16).toString('hex');
+      const hash = crypto.pbkdf2Sync(code, salt, 100000, 32, 'sha256').toString('hex');
+      const recoveryData = { hash, salt, configured_at: new Date().toISOString() };
+
+      mockStore.manager_recovery = recoveryData;
+
+      if (user?.id) {
+        try {
+          await admin.auth.admin.updateUserById(user.id, {
+            user_metadata: { ...(user.user_metadata || {}), manager_recovery: recoveryData }
+          });
+        } catch (authErr) {
+          console.warn("Save manager_recovery to auth user_metadata failed:", authErr.message || authErr);
+        }
+
+        try {
+          const currentPerms = (p && p.permissions && typeof p.permissions === 'object') ? p.permissions : {};
+          await admin.from('profiles').update({
+            permissions: { ...currentPerms, _manager_recovery: recoveryData },
+            updated_at: new Date().toISOString()
+          }).eq('id', user.id);
+        } catch (profErr) {
+          console.warn("Save manager_recovery to profiles failed:", profErr.message || profErr);
+        }
+      }
+
+      try {
+        await admin.from('system_control').upsert({
+          id: 'manager_recovery',
+          value: recoveryData,
+          payload: recoveryData,
+          updated_at: new Date().toISOString()
+        });
+      } catch (_scErr) {}
+
+      return json(res, 200, { ok: true, configured: true });
+    }
     if (input.action === 'create') return json(res, 200, { ok: true, account: await create(admin, input) });
     if (input.action === 'delete') {
       const uid = String(input.uid || '');

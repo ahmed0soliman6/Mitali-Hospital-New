@@ -3532,8 +3532,8 @@ console.log("Computation layer ready.");
 // ======================================================================
 // تكامل Firestore (قاعدة البيانات الرئيسية الوحيدة)
 // ======================================================================
-const APP_VERSION = "v1.3.49";
-const APP_RELEASE_NOTES = "حفظ واستعادة تصنيفات الوارد والمنصرف • نقل بطاقات الأرشفة وحذف البيانات إلى أسفل الإعدادات";
+const APP_VERSION = "v1.3.50";
+const APP_RELEASE_NOTES = "تفعيل ميزة استرداد كلمة مرور المدير وحفظ رمز الاسترداد المشفر بنجاح";
 const FIRESTORE_MIGRATION_KEYS = ["doctors","employees","visitsClinic","visitsDental","visitsOperations","visitsLabs","visitsRadiology","income","expense","payroll","auditLog","labExpenses","categories","specialties","settings"];
 // Restore إداري صريح: الحذف هنا ناتج عن قائمة النسخة الاحتياطية نفسها، وليس
 // عن storeSetInner أو مقارنة Snapshot عادية. لا يُستدعى أثناء CRUD المعتاد.
@@ -8120,7 +8120,7 @@ function renderSettings() {
       </p>
       <div style="border-top:1px solid var(--line); margin-top:12px; padding-top:12px;">
         <div style="font-weight:800; font-size:13px; margin-bottom:6px;">إعداد رمز استرداد المدير</div>
-        <p class="hint" style="line-height:1.8; margin-bottom:9px;">لا تُحفظ قيمة الرمز نفسها في Firestore؛ يُحفظ اشتقاق PBKDF2 فقط. احتفظ بالرمز خارج المتصفح، لأن فقدانه يعني الحاجة إلى إعداد رمز جديد أثناء تسجيل دخول المدير.</p>
+        <p class="hint" style="line-height:1.8; margin-bottom:9px;">لا تُحفظ قيمة الرمز نفسها في السحابة؛ يُحفظ اشتقاق آمن فقط. احتفظ بالرمز خارج المتصفح، لأن فقدانه يعني الحاجة إلى إعداد رمز جديد أثناء تسجيل دخول المدير.</p>
         <div class="field"><label>رمز الاسترداد</label><div style="display:flex; gap:7px; align-items:center;"><input id="adminRecoveryCodeInput" type="text" autocomplete="off" placeholder="10 أحرف أو أرقام على الأقل" style="flex:1; letter-spacing:1px;"><button type="button" class="btn ghost sm" id="generateAdminRecoveryBtn">توليد رمز</button></div></div>
         <button class="btn" id="saveAdminRecoveryBtn" style="margin-top:10px;">حفظ رمز الاسترداد</button>
       </div>
