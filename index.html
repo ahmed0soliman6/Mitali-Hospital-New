@@ -476,11 +476,56 @@ function ensureSettingsDefaults(value) {
 // تصنيفات الوارد والمنصرف - قابلة للإدارة بالكامل (إضافة/تعديل/حذف/ترتيب)
 function seedCategories() {
   return {
-    income: ["كشف","تحاليل","أشعة","أسنان","عمليات","تبرعات","أخرى"].map((name, i) => ({ id: uid(), name, order: i })),
+    income: ["كشف","تحاليل","أشعة","أسنان","عمليات","تبرعات","اشتراكات","أخرى"].map((name, i) => ({ id: uid(), name, order: i })),
     expense: ["مرتبات","مشتريات","صيانة","خدمات","نظافة","كهرباء","مياه","مستلزمات طبية","أخرى"].map((name, i) => ({ id: uid(), name, order: i })),
   };
 }
+function ensureValidCategories() {
+  if (!DB.categories || typeof DB.categories !== "object" || Array.isArray(DB.categories)) {
+    DB.categories = { income: [], expense: [] };
+  }
+  if (!Array.isArray(DB.categories.income)) DB.categories.income = [];
+  if (!Array.isArray(DB.categories.expense)) DB.categories.expense = [];
+
+  const defaultIncomeNames = ["كشف","تحاليل","أشعة","أسنان","عمليات","تبرعات","اشتراكات","أخرى"];
+  const defaultExpenseNames = ["مرتبات","مشتريات","صيانة","خدمات","نظافة","كهرباء","مياه","مستلزمات طبية","أخرى"];
+
+  if (Array.isArray(DB.income)) {
+    DB.income.forEach(inc => {
+      const name = String(inc?.category || "").trim();
+      if (name && !defaultIncomeNames.includes(name)) defaultIncomeNames.push(name);
+    });
+  }
+  if (Array.isArray(DB.expense)) {
+    DB.expense.forEach(exp => {
+      const name = String(exp?.category || "").trim();
+      if (name && !defaultExpenseNames.includes(name)) defaultExpenseNames.push(name);
+    });
+  }
+
+  if (DB.categories.income.length === 0) {
+    DB.categories.income = defaultIncomeNames.map((name, i) => ({ id: uid(), name, order: i }));
+  } else {
+    defaultIncomeNames.forEach(name => {
+      if (!DB.categories.income.some(c => c.name === name)) {
+        DB.categories.income.push({ id: uid(), name, order: DB.categories.income.length });
+      }
+    });
+  }
+
+  if (DB.categories.expense.length === 0) {
+    DB.categories.expense = defaultExpenseNames.map((name, i) => ({ id: uid(), name, order: i }));
+  } else {
+    defaultExpenseNames.forEach(name => {
+      if (!DB.categories.expense.some(c => c.name === name)) {
+        DB.categories.expense.push({ id: uid(), name, order: DB.categories.expense.length });
+      }
+    });
+  }
+  return DB.categories;
+}
 function sortedCats(kind) {
+  ensureValidCategories();
   const list = (DB.categories && DB.categories[kind]) ? DB.categories[kind] : [];
   return [...list].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 }
@@ -1673,8 +1718,8 @@ async function loadAll(options = {}) {
   // لا نُنشئ أو نكتب حسابات من الكاش المحلي؛ الحسابات تُدار عبر users/API فقط.
   DB.labExpenses = labExpensesRaw || [];
   DB.categories = categoriesRaw;
-  if (!DB.categories || (!DB.categories.income?.length && !DB.categories.expense?.length)) {
-    DB.categories = seedCategories();
+  ensureValidCategories();
+  if (!categoriesRaw || (!categoriesRaw.income?.length && !categoriesRaw.expense?.length)) {
     if (isManager || can("categories", "edit")) persist("categories");
   }
   DB.specialties = specialtiesRaw;
@@ -3487,8 +3532,8 @@ console.log("Computation layer ready.");
 // ======================================================================
 // تكامل Firestore (قاعدة البيانات الرئيسية الوحيدة)
 // ======================================================================
-const APP_VERSION = "v1.3.48";
-const APP_RELEASE_NOTES = "تقليل قراءات Firestore • تحميل البيانات عند الحاجة • حماية الحصة المجانية مع كاش محلي";
+const APP_VERSION = "v1.3.49";
+const APP_RELEASE_NOTES = "حفظ واستعادة تصنيفات الوارد والمنصرف • نقل بطاقات الأرشفة وحذف البيانات إلى أسفل الإعدادات";
 const FIRESTORE_MIGRATION_KEYS = ["doctors","employees","visitsClinic","visitsDental","visitsOperations","visitsLabs","visitsRadiology","income","expense","payroll","auditLog","labExpenses","categories","specialties","settings"];
 // Restore إداري صريح: الحذف هنا ناتج عن قائمة النسخة الاحتياطية نفسها، وليس
 // عن storeSetInner أو مقارنة Snapshot عادية. لا يُستدعى أثناء CRUD المعتاد.
@@ -8051,6 +8096,7 @@ function sortedDoctors() {
 function renderSettings() {
   const c = document.getElementById("content");
   DB.settings = ensureSettingsDefaults(DB.settings);
+  ensureValidCategories();
   if ((!DB.doctors || !DB.doctors.length) && window.MitaliSupabase) {
     window.MitaliSupabase.getValue("doctors", []).then(docs => {
       if (Array.isArray(docs) && docs.length && (!DB.doctors || !DB.doctors.length)) {
@@ -8077,55 +8123,6 @@ function renderSettings() {
         <p class="hint" style="line-height:1.8; margin-bottom:9px;">لا تُحفظ قيمة الرمز نفسها في Firestore؛ يُحفظ اشتقاق PBKDF2 فقط. احتفظ بالرمز خارج المتصفح، لأن فقدانه يعني الحاجة إلى إعداد رمز جديد أثناء تسجيل دخول المدير.</p>
         <div class="field"><label>رمز الاسترداد</label><div style="display:flex; gap:7px; align-items:center;"><input id="adminRecoveryCodeInput" type="text" autocomplete="off" placeholder="10 أحرف أو أرقام على الأقل" style="flex:1; letter-spacing:1px;"><button type="button" class="btn ghost sm" id="generateAdminRecoveryBtn">توليد رمز</button></div></div>
         <button class="btn" id="saveAdminRecoveryBtn" style="margin-top:10px;">حفظ رمز الاسترداد</button>
-      </div>
-    </div>` : ""}
-    ${isAdminUser() ? `
-    <div class="card storage-archive-card" style="margin-bottom:18px; border-inline-start:3px solid var(--accent, #0284c7);">
-      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
-        <div class="section-title" style="margin-bottom:0;">🗄️ تفريغ وأرشفة سنة كاملة</div>
-        <div style="display:flex; align-items:center; gap:8px;">
-          <span style="font-size:12px; font-weight:700; color:var(--muted);">نسبة الامتلاء:</span>
-          <div style="width:75px; height:8px; background:var(--line); border-radius:999px; overflow:hidden;">
-            <div id="storageProgressBar" style="height:100%; width:${SYSTEM_STORAGE_METRICS ? Math.min(100, Math.round(SYSTEM_STORAGE_METRICS.percentUsed)) : 10}%; background:${SYSTEM_STORAGE_METRICS && SYSTEM_STORAGE_METRICS.percentUsed >= 85 ? 'var(--expense)' : SYSTEM_STORAGE_METRICS && SYSTEM_STORAGE_METRICS.percentUsed >= 70 ? 'var(--gold)' : 'var(--accent)'}; transition:width 0.4s ease;"></div>
-          </div>
-          <span id="storagePercentLabel" style="font-size:12.5px; font-weight:800; min-width:32px;">${SYSTEM_STORAGE_METRICS ? Math.round(SYSTEM_STORAGE_METRICS.percentUsed) + '%' : '10%'}</span>
-        </div>
-      </div>
-      <p class="hint" style="line-height:1.7; margin-bottom:14px;">
-        اختر السنة المراد تصديرها أو تفريغها من السحابة. عند تفريغ السنة، تُحذف سجلات الزيارات والوارد والمنصرف الخاصة بهذه السنة فقط لتوفير مساحة بالسحابة. <strong>تظل ملفات المرضى وتاريخ فتح الملف، وبيانات الأطباء والموظفين والتخصصات والتصنيفات والإعدادات والحسابات محفوظة بالكامل دون أي مساس.</strong>
-      </p>
-
-      <div id="storageWarningBanner" style="margin-bottom:14px; padding:10px 14px; background:color-mix(in srgb, var(--expense) 12%, var(--card-bg)); color:var(--expense); border:1px solid var(--expense); border-radius:8px; font-weight:700; font-size:13px; line-height:1.6; display:${SYSTEM_STORAGE_METRICS && (SYSTEM_STORAGE_METRICS.warning || SYSTEM_STORAGE_METRICS.percentUsed >= 85) ? 'flex' : 'none'}; align-items:center; gap:10px;">
-        <span style="font-size:20px; flex-shrink:0;">⚠️</span>
-        <span>تنبيه سعة التخزين: مساحة السحابة اقتربت من الامتلاء، يُرجى تصدير وحذف سنة سابقة لتوفير مساحة مجانية.</span>
-      </div>
-
-      <div style="display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:14px;">
-        <label for="archiveYearSelect" style="font-weight:700; font-size:13px;">اختر السنة:</label>
-        <select id="archiveYearSelect" style="padding:6px 12px; border-radius:8px; border:1px solid var(--line); font-weight:700; min-width:120px; background:var(--card-bg); color:var(--text);">
-          ${generateArchiveYearOptions()}
-        </select>
-      </div>
-      <div style="display:flex; flex-wrap:wrap; gap:10px;">
-        <button type="button" class="btn sm" id="exportArchiveYearBtn">📥 تصدير وتحميل أرشيف السنة (JSON)</button>
-        <button type="button" class="btn danger sm" id="purgeArchiveYearBtn">🗑️ حذف سجلات هذه السنة من السحابة</button>
-      </div>
-    </div>` : ""}
-    ${isAdminUser() ? `
-    <div class="card destructive-tools-card" style="margin-bottom:18px; border-inline-start:3px solid var(--expense);">
-      <div class="section-title">🧹 حذف البيانات</div>
-      <p class="hint" style="line-height:1.8; margin-bottom:12px;">هذه الأدوات منفصلة عن النسخ الاحتياطي. لا تستخدم الحذف قبل التأكد من وجود نسخة احتياطية، ولا تغلق الصفحة أثناء تنفيذ الحذف السحابي.</p>
-      <div class="two-col" style="grid-template-columns:1fr 1fr; gap:12px;">
-        <div style="border:1px solid var(--line); border-radius:10px; padding:12px;">
-          <div style="font-weight:800; margin-bottom:6px;">حذف بيانات هذا المتصفح فقط</div>
-          <div class="hint" style="line-height:1.7; margin-bottom:10px;">يمسح بيانات العمل المحلية، والكاش، والطابور، وbaseline وtombstones من هذا المتصفح فقط. لا يحذف السحابة ولا الحساب، لكنه يفقد أي تغييرات محلية لم تُرفع بعد.</div>
-          <button class="btn danger sm" id="clearBrowserDataBtn">حذف بيانات المتصفح</button>
-        </div>
-        <div style="border:1px solid color-mix(in srgb, var(--expense) 55%, var(--line)); border-radius:10px; padding:12px;">
-          <div style="font-weight:800; margin-bottom:6px;">حذف بيانات المستشفى من السحابة وكل الأجهزة</div>
-          <div class="hint" style="line-height:1.7; margin-bottom:10px;">يمسح ملفات المرضى والزيارات والوارد والمنصرف فقط من Firestore، ثم يرسل أمرًا للأجهزة المفتوحة لمسح كاش هذه الملفات. الأطباء والموظفون والتخصصات والتصنيفات والإعدادات والحسابات لا تُحذف.</div>
-          <button class="btn danger sm" id="wipeCloudDataBtn">حذف ملفات المرضى والوارد والمنصرف</button>
-        </div>
       </div>
     </div>` : ""}
     ${canSettingsEdit ? `
@@ -8378,6 +8375,56 @@ function renderSettings() {
         </div>
       </div>` : "<div></div>"}
     </div>
+
+    ${isAdminUser() ? `
+    <div class="card storage-archive-card" style="margin-bottom:18px; border-inline-start:3px solid var(--accent, #0284c7);">
+      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:10px;">
+        <div class="section-title" style="margin-bottom:0;">🗄️ تفريغ وأرشفة سنة كاملة</div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span style="font-size:12px; font-weight:700; color:var(--muted);">نسبة الامتلاء:</span>
+          <div style="width:75px; height:8px; background:var(--line); border-radius:999px; overflow:hidden;">
+            <div id="storageProgressBar" style="height:100%; width:${SYSTEM_STORAGE_METRICS ? Math.min(100, Math.round(SYSTEM_STORAGE_METRICS.percentUsed)) : 10}%; background:${SYSTEM_STORAGE_METRICS && SYSTEM_STORAGE_METRICS.percentUsed >= 85 ? 'var(--expense)' : SYSTEM_STORAGE_METRICS && SYSTEM_STORAGE_METRICS.percentUsed >= 70 ? 'var(--gold)' : 'var(--accent)'}; transition:width 0.4s ease;"></div>
+          </div>
+          <span id="storagePercentLabel" style="font-size:12.5px; font-weight:800; min-width:32px;">${SYSTEM_STORAGE_METRICS ? Math.round(SYSTEM_STORAGE_METRICS.percentUsed) + '%' : '10%'}</span>
+        </div>
+      </div>
+      <p class="hint" style="line-height:1.7; margin-bottom:14px;">
+        اختر السنة المراد تصديرها أو تفريغها من السحابة. عند تفريغ السنة، تُحذف سجلات الزيارات والوارد والمنصرف الخاصة بهذه السنة فقط لتوفير مساحة بالسحابة. <strong>تظل ملفات المرضى وتاريخ فتح الملف، وبيانات الأطباء والموظفين والتخصصات والتصنيفات والإعدادات والحسابات محفوظة بالكامل دون أي مساس.</strong>
+      </p>
+
+      <div id="storageWarningBanner" style="margin-bottom:14px; padding:10px 14px; background:color-mix(in srgb, var(--expense) 12%, var(--card-bg)); color:var(--expense); border:1px solid var(--expense); border-radius:8px; font-weight:700; font-size:13px; line-height:1.6; display:${SYSTEM_STORAGE_METRICS && (SYSTEM_STORAGE_METRICS.warning || SYSTEM_STORAGE_METRICS.percentUsed >= 85) ? 'flex' : 'none'}; align-items:center; gap:10px;">
+        <span style="font-size:20px; flex-shrink:0;">⚠️</span>
+        <span>تنبيه سعة التخزين: مساحة السحابة اقتربت من الامتلاء، يُرجى تصدير وحذف سنة سابقة لتوفير مساحة مجانية.</span>
+      </div>
+
+      <div style="display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:14px;">
+        <label for="archiveYearSelect" style="font-weight:700; font-size:13px;">اختر السنة:</label>
+        <select id="archiveYearSelect" style="padding:6px 12px; border-radius:8px; border:1px solid var(--line); font-weight:700; min-width:120px; background:var(--card-bg); color:var(--text);">
+          ${generateArchiveYearOptions()}
+        </select>
+      </div>
+      <div style="display:flex; flex-wrap:wrap; gap:10px;">
+        <button type="button" class="btn sm" id="exportArchiveYearBtn">📥 تصدير وتحميل أرشيف السنة (JSON)</button>
+        <button type="button" class="btn danger sm" id="purgeArchiveYearBtn">🗑️ حذف سجلات هذه السنة من السحابة</button>
+      </div>
+    </div>` : ""}
+    ${isAdminUser() ? `
+    <div class="card destructive-tools-card" style="margin-bottom:18px; border-inline-start:3px solid var(--expense);">
+      <div class="section-title">🧹 حذف البيانات</div>
+      <p class="hint" style="line-height:1.8; margin-bottom:12px;">هذه الأدوات منفصلة عن النسخ الاحتياطي. لا تستخدم الحذف قبل التأكد من وجود نسخة احتياطية، ولا تغلق الصفحة أثناء تنفيذ الحذف السحابي.</p>
+      <div class="two-col" style="grid-template-columns:1fr 1fr; gap:12px;">
+        <div style="border:1px solid var(--line); border-radius:10px; padding:12px;">
+          <div style="font-weight:800; margin-bottom:6px;">حذف بيانات هذا المتصفح فقط</div>
+          <div class="hint" style="line-height:1.7; margin-bottom:10px;">يمسح بيانات العمل المحلية، والكاش، والطابور، وbaseline وtombstones من هذا المتصفح فقط. لا يحذف السحابة ولا الحساب، لكنه يفقد أي تغييرات محلية لم تُرفع بعد.</div>
+          <button class="btn danger sm" id="clearBrowserDataBtn">حذف بيانات المتصفح</button>
+        </div>
+        <div style="border:1px solid color-mix(in srgb, var(--expense) 55%, var(--line)); border-radius:10px; padding:12px;">
+          <div style="font-weight:800; margin-bottom:6px;">حذف بيانات المستشفى من السحابة وكل الأجهزة</div>
+          <div class="hint" style="line-height:1.7; margin-bottom:10px;">يمسح ملفات المرضى والزيارات والوارد والمنصرف فقط من Firestore، ثم يرسل أمرًا للأجهزة المفتوحة لمسح كاش هذه الملفات. الأطباء والموظفون والتخصصات والتصنيفات والإعدادات والحسابات لا تُحذف.</div>
+          <button class="btn danger sm" id="wipeCloudDataBtn">حذف ملفات المرضى والوارد والمنصرف</button>
+        </div>
+      </div>
+    </div>` : ""}
   `;
 
   const generateAdminRecoveryBtn = document.getElementById("generateAdminRecoveryBtn");
@@ -8665,6 +8712,32 @@ function renderSettings() {
           data.settings = v;
           return;
         }
+        if (canonicalKey === "categories") {
+          let cats = v;
+          if (Array.isArray(v) && v.length && (v[0].income || v[0].expense)) cats = v[0];
+          else if (v && v.app && (v.app.income || v.app.expense)) cats = v.app;
+          if (cats && typeof cats === "object" && !Array.isArray(cats)) {
+            data.categories = {
+              income: (Array.isArray(cats.income) ? cats.income : []).map((c, i) => ({ id: (c && c.id) || uid(), name: typeof c === "string" ? c : (c && c.name) || "", order: (c && c.order != null) ? Number(c.order) : i })).filter(c => c.name),
+              expense: (Array.isArray(cats.expense) ? cats.expense : []).map((c, i) => ({ id: (c && c.id) || uid(), name: typeof c === "string" ? c : (c && c.name) || "", order: (c && c.order != null) ? Number(c.order) : i })).filter(c => c.name)
+            };
+          } else {
+            data.categories = seedCategories();
+          }
+          return;
+        }
+        if (canonicalKey === "specialties") {
+          let specs = v;
+          if (Array.isArray(v)) specs = v;
+          else if (v && Array.isArray(v.value)) specs = v.value;
+          else if (v && typeof v === "object") specs = Object.values(v);
+          data.specialties = (Array.isArray(specs) ? specs : []).map((s, i) => ({
+            id: (s && s.id) || uid(),
+            name: typeof s === "string" ? s : (s && s.name) || "",
+            order: (s && s.order != null) ? Number(s.order) : i
+          })).filter(s => s.name);
+          return;
+        }
 
         let rawItems = [];
         if (Array.isArray(v)) {
@@ -8949,20 +9022,20 @@ function renderSettings() {
 
   // ---- إدارة التصنيفات ----
   c.querySelectorAll(".cat-add-form").forEach(form => {
-    form.addEventListener("submit", e => {
+    form.addEventListener("submit", async e => {
       e.preventDefault();
       if (!can("categories","add")) { showToast("⚠️ ليس لديك صلاحية إضافة تصنيفات"); return; }
       const kind = form.dataset.catkind;
       const input = form.querySelector('[name="catName"]');
       const name = input.value.trim();
       if (!name) return;
-      DB.categories = DB.categories || { income: [], expense: [] };
+      ensureValidCategories();
       DB.categories[kind] = DB.categories[kind] || [];
       if (DB.categories[kind].some(x => x.name === name)) { showToast("⚠️ هذا التصنيف موجود بالفعل"); return; }
       const maxOrder = DB.categories[kind].reduce((m, x) => Math.max(m, x.order ?? 0), -1);
       DB.categories[kind].push({ id: uid(), name, order: maxOrder + 1 });
       logActivity("إضافة تصنيف", "categories", null, name);
-      persist("categories"); showToast("تمت إضافة التصنيف"); route();
+      await persist("categories"); showToast("تمت إضافة التصنيف"); route();
     });
   });
   c.querySelectorAll("[data-catsearch]").forEach(inp => {
@@ -10476,6 +10549,11 @@ async function refreshTableFromFirestore(key, changes) {
     let safeFresh;
     if (["settings", "categories", "specialties"].includes(key)) {
       safeFresh = await window.MitaliSupabase.getValue(key, DB[key]);
+      if (key === "categories") {
+        if (!safeFresh || (!safeFresh.income?.length && !safeFresh.expense?.length)) {
+          return;
+        }
+      }
     } else {
       const next = Array.isArray(DB[key]) ? DB[key].slice() : [];
       const tombstones = await readSyncTombstones();

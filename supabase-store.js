@@ -329,6 +329,12 @@
       id: String(row.id || payload.id || ""),
       updatedAt: row.updated_at || payload.updatedAt || payload.createdAt || ""
     };
+    if (row.value !== undefined && row.value !== null) {
+      res.value = row.value;
+      if (typeof row.value === "object" && !Array.isArray(row.value)) {
+        Object.assign(res, row.value);
+      }
+    }
     if (row.date !== undefined && row.date !== null) res.date = row.date;
     if (row.month !== undefined && row.month !== null) res.month = row.month;
     if (row.file_no !== undefined && row.file_no !== null) res.fileNo = row.file_no;
@@ -567,7 +573,35 @@
     const last = records[records.length - 1];
     return { records, pageSize, hasMore: rows.length > from + pageSize, nextCursor: last ? { primaryValue: last[order] || "", documentId: last.id } : null };
   }
-  async function getValue(key, fallback) { const rows = await getTable(key); if (!rows.length) return fallback; if (["settings", "categories"].includes(key)) return rows[0]; if (key === "specialties") return Array.isArray(rows[0].value) ? rows[0].value : fallback; return rows; }
+  async function getValue(key, fallback) {
+    const rows = await getTable(key);
+    if (!rows.length) return fallback;
+    if (key === "categories") {
+      const best = rows.find(r => r.id === "app" || r.id === "categories") || rows[0];
+      if (best) {
+        let catObj = best;
+        if (best.value && typeof best.value === "object" && !Array.isArray(best.value)) {
+          catObj = { ...best, ...best.value };
+        }
+        const inc = Array.isArray(catObj.income) ? catObj.income : [];
+        const exp = Array.isArray(catObj.expense) ? catObj.expense : [];
+        if (inc.length > 0 || exp.length > 0) {
+          return { id: "app", income: inc, expense: exp };
+        }
+      }
+      return fallback;
+    }
+    if (key === "specialties") {
+      const best = rows.find(r => r.id === "app" || r.id === "specialties") || rows[0];
+      const val = Array.isArray(best?.value) ? best.value : (Array.isArray(best?.payload?.value) ? best.payload.value : (Array.isArray(best?.payload) ? best.payload : fallback));
+      return val;
+    }
+    if (key === "settings") {
+      const best = rows.find(r => r.id === "app" || r.id === "settings") || rows[0];
+      return best;
+    }
+    return rows;
+  }
   async function upsertRecords(key, records) {
     await ready();
     const validRecs = (records || []).filter(r => r?.id);
@@ -625,7 +659,15 @@
     const all = readMockRows().filter(r => !(r.collection === collectionName(key) && idSet.has(String(r.id))));
     writeMockRows(all);
   }
-  async function setValue(key, value) { return upsertRecord(key, { id: "app", ...(Array.isArray(value) && key === "specialties" ? { value } : value || {}) }); }
+  async function setValue(key, value) {
+    if (key === "categories") {
+      const safeVal = (value && typeof value === "object" && !Array.isArray(value)) ? value : {};
+      const inc = Array.isArray(safeVal.income) ? safeVal.income : [];
+      const exp = Array.isArray(safeVal.expense) ? safeVal.expense : [];
+      return upsertRecord("categories", { id: "app", income: inc, expense: exp });
+    }
+    return upsertRecord(key, { id: "app", ...(Array.isArray(value) && key === "specialties" ? { value } : value || {}) });
+  }
   async function setTable(key, records) {
     await ready();
     const collection = collectionName(key), keep = records.map(r => String(r.id));
